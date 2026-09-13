@@ -41,6 +41,10 @@ class Broker:
         #: startup, and two creations that pick an id before either has
         #: registered would pick the same one.
         self._lock = asyncio.Lock()
+        #: Set to end this broker. `nv restart-broker` uses it so a broker
+        #: carrying stale code goes away the way one that idles out does:
+        #: state saved, sessions detached, nvim left running for the next.
+        self.stop = asyncio.Event()
 
     @property
     def clients(self) -> int:
@@ -229,6 +233,13 @@ async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _stop(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
+    # The reply goes out before the loop notices: closing the listeners waits
+    # for the connection this arrived on.
+    broker.stop.set()
+    return {"sessions": len(broker.sessions)}
+
+
 async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
     listing = []
     for session in broker.sessions.values():
@@ -261,6 +272,7 @@ ADMIN_COMMANDS = {
     "ping": _ping,
     "new": _new,
     "ensure": _ensure,
+    "stop": _stop,
     "ls": _ls,
     "attach": _attach,
     "kill": _kill,
@@ -353,6 +365,8 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         return
 
     broker = Broker()
+    if stop is not None:
+        broker.stop = stop
     await broker.restore()
     for socket_path in (paths.admin_socket(), paths.agent_socket()):
         socket_path.unlink(missing_ok=True)
@@ -372,7 +386,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
 
     try:
         async with admin, agent:
-            await _until_idle(broker, stop)
+            await _until_idle(broker)
             for connection in list(broker.connections):
                 connection.cancel()
             await asyncio.gather(*broker.connections, return_exceptions=True)
@@ -385,7 +399,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
             socket_path.unlink(missing_ok=True)
 
 
-async def _until_idle(broker: Broker, stop: asyncio.Event | None) -> None:
+async def _until_idle(broker: Broker) -> None:
     """Wait while the broker has work.
 
     A session with no client is not idle: its review may be finished and waiting
@@ -393,13 +407,10 @@ async def _until_idle(broker: Broker, stop: asyncio.Event | None) -> None:
     """
     idle_for = 0.0
     while True:
-        if stop is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(stop.wait(), 5)
-            if stop.is_set():
-                return
-        else:
-            await asyncio.sleep(5)
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(broker.stop.wait(), 5)
+        if broker.stop.is_set():
+            return
         if broker.sessions or broker.clients:
             idle_for = 0.0
             continue

@@ -4,10 +4,13 @@
 from __future__ import annotations
 
 import asyncio
+import fcntl
 from pathlib import Path
 
 import pytest
+from conftest import admin, start_broker, stop_broker
 
+from nvim_mcp import paths
 from nvim_mcp.broker import Broker
 from nvim_mcp.nvimrpc import NvimRPC
 from nvim_mcp.session import Session
@@ -74,3 +77,29 @@ async def test_asking_whether_a_dead_session_is_attached_does_not_revive_it(
     assert await session.attached() is False
     assert session.editor.process is first, "listing the session started a new nvim"
     await session.close()
+
+
+async def test_stop_hands_the_sessions_to_the_next_broker(
+    runtime: Path, repo: Path
+) -> None:
+    """`nv restart-broker` is this, then a new broker on the same sockets."""
+    stop, task = await start_broker()
+    created = await admin({"cmd": "new", "root": str(repo)})
+    reply = await admin({"cmd": "stop"})
+    assert reply["sessions"] == 1
+    await asyncio.wait_for(task, 30)
+
+    # The lock is what a restart waits on: the sockets go before it does, so a
+    # broker started on their absence would find the lock held and exit.
+    with paths.lock_path().open("w") as handle:
+        fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        fcntl.flock(handle, fcntl.LOCK_UN)
+
+    stop, task = await start_broker()
+    try:
+        # Same key, and the nvim the first broker started is still the one
+        # behind it.
+        sessions = (await admin({"cmd": "ls"}))["sessions"]
+        assert [s["key"] for s in sessions] == [created["key"]]
+    finally:
+        await stop_broker(stop, task)

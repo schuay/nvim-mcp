@@ -13,11 +13,14 @@ from __future__ import annotations
 
 import argparse
 import contextlib
+import fcntl
 import json
 import os
 import secrets
 import shutil
+import signal
 import socket
+import struct
 import subprocess
 import sys
 import time
@@ -213,6 +216,65 @@ def _revive_broker() -> None:
         _ensure_broker()
 
 
+def cmd_restart_broker(_args: argparse.Namespace) -> int:
+    """Replace the running broker with one built from the code on disk.
+
+    A broker holds `session.lua` and its own modules from the moment it
+    started, so a change to either reaches a session only after this. nvim is
+    untouched: the sessions are adopted by the new broker, and a session whose
+    Lua changed needs its nvim restarted too, which `:q` does.
+    """
+    try:
+        reply = _ask({"cmd": "stop"})
+    except OSError:
+        print("nvim-mcp: no broker running")
+    else:
+        if reply.get("ok"):
+            print(f"nvim-mcp: stopping, {reply['sessions']} session(s) to hand over")
+        else:
+            # A broker old enough not to know the command is exactly the one
+            # worth replacing, so ask the socket who is listening and signal
+            # it. State is written as it changes, not at exit, so what the
+            # next broker restores is the same either way.
+            _terminate_broker(reply.get("error", "stop refused"))
+        # The lock, not the socket: the old broker unlinks its sockets before
+        # it releases the lock, and a new one that starts too early finds the
+        # lock held and exits without a word.
+        if not _lock_free(10.0):
+            raise SystemExit("nvim-mcp: the broker is still running")
+    _ensure_broker()
+    sessions = _ask({"cmd": "ls"})["sessions"]
+    print(f"nvim-mcp: broker restarted with {len(sessions)} session(s)")
+    return 0
+
+
+def _terminate_broker(reason: str) -> None:
+    with socket.socket(socket.AF_UNIX) as sock:
+        sock.connect(str(paths.admin_socket()))
+        credentials = sock.getsockopt(
+            socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
+        )
+    pid, _, _ = struct.unpack("3i", credentials)
+    print(f"nvim-mcp: {reason}; signalling broker {pid}")
+    with contextlib.suppress(ProcessLookupError, PermissionError):
+        os.kill(pid, signal.SIGTERM)
+
+
+def _lock_free(timeout: float) -> bool:
+    """Wait for the broker's lock to be released, which happens as it exits."""
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with paths.lock_path().open("w") as handle:
+            try:
+                fcntl.flock(handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except BlockingIOError:
+                time.sleep(0.05)
+                continue
+            fcntl.flock(handle, fcntl.LOCK_UN)
+            return True
+    return False
+
+
 def cmd_broker(_args: argparse.Namespace) -> int:
     from . import broker
 
@@ -276,6 +338,10 @@ def main(argv: list[str] | None = None) -> int:
     kill = sub.add_parser("kill", help="stop a session")
     kill.add_argument("id")
     kill.set_defaults(func=cmd_kill)
+
+    sub.add_parser(
+        "restart-broker", help="replace the broker with one built from the code on disk"
+    ).set_defaults(func=cmd_restart_broker)
 
     sub.add_parser("mcp", help="serve MCP on stdio").set_defaults(func=cmd_mcp)
     sub.add_parser("broker", help="run the broker in the foreground").set_defaults(

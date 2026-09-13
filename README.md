@@ -67,6 +67,11 @@ survives a broker restart: it reconnects on the next call and replays the
 handshake, so the client never notices. The broker in turn survives its own
 restart by adopting the nvim it left running, with your unsaved edits in it.
 
+A broker holds `session.lua` and its own code from the moment it started, so
+after changing either, `nv restart-broker` puts a new one on the same sockets
+and hands it the sessions. Changed Lua reaches a session when its nvim next
+starts, which `:q` does.
+
 ## What the broker will not do
 
 - No command writes a file, saves a buffer, or edits buffer text. The agent
