@@ -513,6 +513,24 @@ vim.api.nvim_create_user_command('AgentPop', function() request_pop(nil) end,
 vim.api.nvim_create_user_command('AgentDrop', function(o) request_pop(o.args) end,
   { nargs = 1, desc = 'Drop the named frame of agent notes' })
 
+-- Walking the notes, which is how the quickfix list is read. The top frame is
+-- a handful of entries, so its end is a place to wrap rather than the error
+-- :cnext gives there. Ctrl-Alt because terminals keep Ctrl-Shift-PageUp for
+-- their own scrollback.
+local function walk(step, wrap)
+  return function()
+    if vim.fn.getqflist({ size = 0 }).size == 0 then
+      vim.notify('nvim-mcp: no notes')
+    elseif not pcall(vim.cmd, step) then
+      vim.cmd(wrap)
+    end
+  end
+end
+vim.keymap.set('n', '<C-M-PageDown>', walk('cnext', 'cfirst'),
+  { desc = 'Jump to the next agent note' })
+vim.keymap.set('n', '<C-M-PageUp>', walk('cprevious', 'clast'),
+  { desc = 'Jump to the previous agent note' })
+
 -- The human's half of the conversation. `:Ask` hands a range to the agent.
 vim.api.nvim_create_user_command('Ask', function(o)
   local buf = vim.api.nvim_get_current_buf()

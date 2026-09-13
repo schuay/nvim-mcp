@@ -227,3 +227,39 @@ async def test_a_long_note_is_clipped_in_the_quickfix_list(
     assert line.endswith("...")
     await nvim.close()
     await wire.close()
+
+
+async def test_the_keys_walk_the_notes_and_wrap_at_the_ends(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    await show(
+        wire,
+        session["key"],
+        locations=[
+            {"file": "src/main.c", "line": 1},
+            {"file": "src/main.c", "line": 3},
+            {"file": "README.md", "line": 1},
+        ],
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    walk = """
+        local keys = vim.api.nvim_replace_termcodes(..., true, false, true)
+        vim.api.nvim_feedkeys(keys, 'x', false)
+        return {
+          idx = vim.fn.getqflist({ idx = 0 }).idx,
+          file = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(0), ':t'),
+        }
+    """
+    down, up = "<C-M-PageDown>", "<C-M-PageUp>"
+    assert await nvim.lua(walk, down) == {"idx": 2, "file": "main.c"}
+    # The walk crosses tabs rather than displacing the window it starts in.
+    assert await nvim.lua(walk, down) == {"idx": 3, "file": "README.md"}
+    assert await nvim.lua("return vim.fn.tabpagenr('$')") == 2
+    # Past either end it comes round instead of reporting E553.
+    assert await nvim.lua(walk, down) == {"idx": 1, "file": "main.c"}
+    assert await nvim.lua(walk, up) == {"idx": 3, "file": "README.md"}
+    await nvim.close()
+    await wire.close()

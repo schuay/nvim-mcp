@@ -27,6 +27,9 @@ an id, `A2` or `B1`, that you and the agent can both say.
 
 On your side:
 
+- Ctrl-Alt-PageDown and Ctrl-Alt-PageUp walk the quickfix list of notes,
+  wrapping at the ends; Ctrl-Shift is left alone because terminals take it for
+  their own scrollback.
 - `:3,5Ask why is this here?` hands lines 3 to 5 and your question to the
   agent, tagged with the note it sits on. The agent collects questions with
   `read`, and a question stays pending until the agent has answered it.
