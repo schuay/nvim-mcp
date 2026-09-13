@@ -23,11 +23,12 @@ import socket
 import struct
 import subprocess
 import sys
+import textwrap
 import time
 from pathlib import Path
 from typing import Any, NoReturn
 
-from . import paths, splice
+from . import install, lifecycle, paths, splice
 
 
 def _ask(request: dict[str, Any], timeout: float = 15.0) -> dict[str, Any]:
@@ -255,6 +256,107 @@ def _revive_broker() -> None:
         _ensure_broker()
 
 
+def _confirm(question: str, assume_yes: bool) -> bool:
+    if assume_yes:
+        return True
+    if not sys.stdin.isatty():
+        print(f"nvim-mcp: {question} -- not a terminal, so nothing was changed.")
+        print("nvim-mcp: pass --yes to write it anyway.")
+        return False
+    try:
+        return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
+    except EOFError:
+        return False
+
+
+def cmd_install(args: argparse.Namespace) -> int:
+    """Register the tools with one harness and say what to do next."""
+    harness = install.HARNESSES[args.harness]
+    if shutil.which("nvim") is None:
+        raise SystemExit(
+            "nvim-mcp: nvim is not on PATH, and it is the whole point.\n"
+            "nvim-mcp: install it first, then run this again."
+        )
+
+    command = install.nv_command()
+    try:
+        path, shown, text = install.plan(harness, command)
+    except install.Unparsable as e:
+        # Better a snippet the human pastes than a file this one rewrote by
+        # guessing at what it meant.
+        print(f"nvim-mcp: {e}")
+        print("nvim-mcp: add this to it yourself:\n")
+        print(textwrap.indent(install.snippet(harness, command), "    "))
+        return 1
+
+    if text is None:
+        print(f"nvim-mcp: {harness.label} already starts {install.NAME} from {path}")
+    else:
+        print(f"nvim-mcp: this goes in {path}:\n")
+        print(textwrap.indent(shown, "    "))
+        print()
+        if not _confirm(f"Add it to {harness.label}?", args.yes):
+            return 1
+        backup = install.apply(path, text)
+        print(f"nvim-mcp: written{f'; previous copy at {backup}' if backup else ''}")
+
+    _offer_terminal(args.yes)
+    print(GREETING.format(harness=harness.label))
+    return 0
+
+
+def _offer_terminal(assume_yes: bool) -> None:
+    """Set up the window a session opens when nobody is watching it."""
+    if os.environ.get(lifecycle.TERMINAL):
+        return
+    suggestion = install.terminal_suggestion()
+    if suggestion is None:
+        return
+    line = f'export {lifecycle.TERMINAL}="{suggestion}"'
+    print(
+        f"\nnvim-mcp: with {lifecycle.TERMINAL} set, a session opens its own window\n"
+        "nvim-mcp: the first time an agent shows you something and nothing is\n"
+        f"nvim-mcp: on screen. For this terminal that is:\n\n    {line}\n"
+    )
+    rc = install.shell_rc()
+    if rc is not None and rc.exists() and lifecycle.TERMINAL in rc.read_text():
+        # Already written by an earlier run, or by hand. Appending a second
+        # export would only be confusing.
+        print(f"nvim-mcp: {rc} already sets it; start a new shell to pick it up.")
+        return
+    if rc is None or not _confirm(f"Append it to {rc}?", assume_yes):
+        print("nvim-mcp: add it to your shell yourself, or leave it out.")
+        return
+    with rc.open("a") as handle:
+        handle.write(
+            f"\n# Opens a window for an nvim-mcp session nobody is watching.\n{line}\n"
+        )
+    print(f"nvim-mcp: appended to {rc}; it applies to new shells.")
+
+
+GREETING = """
+nvim-mcp is set up for {harness}. Restart it so it picks the server up.
+
+  Your agent gets two tools: `show` puts code and its notes in front of you,
+  `read` collects what you are looking at and the questions you hand over.
+
+  In a project directory:
+    nv new .        start a session there and print its key
+    nv ls           what is running, and the key for each
+    nv 1            attach this terminal to session 1
+
+  In the editor:
+    :Ask why this?  hand the line and your question to the agent
+    :3,5Ask ...     hand a range
+    :Ref            copy a reference to the line, to paste back in chat
+    :AgentPop       drop the top frame of notes
+    :q              safe; the session comes back with the notes where your
+                    edits left them
+
+  Give the agent the key `nv new` printed and ask it to show you something.
+"""
+
+
 def cmd_restart_broker(_args: argparse.Namespace) -> int:
     """Replace the running broker with one built from the code on disk.
 
@@ -377,6 +479,13 @@ def main(argv: list[str] | None = None) -> int:
     kill = sub.add_parser("kill", help="stop a session")
     kill.add_argument("id")
     kill.set_defaults(func=cmd_kill)
+
+    installer = sub.add_parser("install", help="register the tools with a harness")
+    installer.add_argument("harness", choices=sorted(install.HARNESSES))
+    installer.add_argument(
+        "--yes", action="store_true", help="do not ask before writing"
+    )
+    installer.set_defaults(func=cmd_install)
 
     sub.add_parser(
         "restart-broker", help="replace the broker with one built from the code on disk"
