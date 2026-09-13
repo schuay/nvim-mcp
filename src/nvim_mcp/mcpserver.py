@@ -52,13 +52,19 @@ SHOW_TOOL = types.Tool(
     name="show",
     title="Show code to the human",
     description=(
-        "Open locations in the human's nvim session: a tab per file, a quickfix "
-        "list of the positions, and a highlight over any range, with each note "
-        "rendered above its line under an id like A2 that you and the human "
-        "can both say. Batch every location you are discussing into one call. "
-        "Notes live in frames: the default replaces the top frame, push starts "
-        "a frame for a digression, pop drops it when answered. Never closes a "
-        "tab."
+        "Put code in front of the human, in the editor they are sitting in. "
+        "Reach for it whenever they ask to see, show, open, look at or be "
+        "pointed at code -- 'show me the parser', 'open that in nvim', 'where "
+        "does this happen' -- and whenever your answer is about particular "
+        "lines they would rather read in place than in chat. Opening a tab "
+        "they did not ask for is the thing to avoid: this is for code in their "
+        "session root, not for quoting a value or a command back to them. "
+        "It opens a tab per file, fills the quickfix list with the positions, "
+        "highlights any range, and renders each note above its line under an "
+        "id like A2 that you and the human can both say. Batch every location "
+        "you are discussing into one call. Notes live in frames: the default "
+        "replaces the top frame, push starts a frame for a digression, pop "
+        "drops it when answered. Never closes a tab."
     ),
     input_schema=models.schema(ShowRequest),
     output_schema=models.schema(ShowResult),
@@ -68,7 +74,11 @@ READ_TOOL = types.Tool(
     name="read",
     title="Read what the human is looking at",
     description=(
-        "Read the human's session. 'marks' collects the ranges they handed over "
+        "Read the human's session: what they are looking at, and what they "
+        "have handed you. Reach for it when they refer to something as 'this', "
+        "'here' or 'what I marked', or when you need the state of a buffer "
+        "they have been editing. "
+        "'marks' collects the ranges they handed over "
         "with :Ask, each with their question; call it when they refer to "
         "something they marked, and pass the ids back in 'ack' once you have "
         "answered them, or they stay pending and come back. 'cursor' is where "
