@@ -38,6 +38,14 @@ On your side:
 - `:q` is safe. The broker holds the record of what is shown and starts nvim
   again, with the notes on the lines your edits moved them to.
 
+Set `NVIM_MCP_TERMINAL` in the shell you start sessions from, to a terminal
+and whatever it needs before a command -- `ghostty -e`, `kitty`, `alacritty
+-e` -- and a session gets a window of its own the first time an agent shows
+something to it while nothing is on screen. One window per nvim, so closing it
+closes it. No setting, or no display in that shell, and you get the attach
+command instead. An agent cannot ask for a window: it only ever happens
+because it showed you something you were not looking at.
+
 ## How it fits together
 
 A host-side broker daemon owns every session. nvim runs headless, so a session

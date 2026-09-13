@@ -362,6 +362,9 @@ class Session:
             return await self._draw(focus=focus, open_files=frame != "pop")
 
         result = await self._attempt(run)
+        # Nothing on screen and something worth seeing: the show already told
+        # us how many UIs nvim has, so this costs no extra round trip.
+        result["opened_ui"] = not result.get("uis") and self.editor.open_window()
         result["frame"] = top.letter if top else None
         result["popped"] = popped
         result["ids"] = (

@@ -139,6 +139,10 @@ class ShowResult(Envelope):
     popped: str | None = Field(
         default=None, description="The frame this call dropped, if any"
     )
+    opened_ui: bool | None = Field(
+        default=None,
+        description="A window was opened for this session; the human is about to see it",
+    )
     ids: list[str] = Field(
         description="Ids of the notes just shown, in the order given, to refer to them by"
     )

@@ -124,6 +124,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
     opened: list[str] = []
     ids: list[str] = []
     popped: str | None = None
+    opened_ui: bool | None = None
     frame = session.frames[-1].letter if session.frames else None
     attached = await session.attached()
     if locations or request.frame == "pop":
@@ -134,6 +135,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         ids = result["ids"]
         frame = result["frame"]
         popped = result["popped"]
+        opened_ui = result["opened_ui"] or None
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
@@ -142,6 +144,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         **_envelope(session, attached),
         frame=frame,
         popped=popped,
+        opened_ui=opened_ui,
         ids=ids,
         frames=[
             FrameSummary(letter=f.letter, title=f.title, notes=len(f.notes))
