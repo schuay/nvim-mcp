@@ -21,7 +21,7 @@ import shutil
 from pathlib import Path
 from typing import Any
 
-from . import mcpserver, paths, splice
+from . import mcpserver, paths, splice, store
 from .clamp import Refused
 from .session import Session
 
@@ -42,6 +42,26 @@ class Broker:
     def clients(self) -> int:
         return len(self.connections)
 
+    def save(self) -> None:
+        store.save([session.state() for session in self.sessions.values()])
+
+    async def restore(self) -> None:
+        """Start the sessions a previous broker left behind.
+
+        A session usually outlives the broker that made it: its review is
+        waiting for a human who has not arrived yet.
+        """
+        for state in store.load():
+            try:
+                session = Session.restore(state)
+                await session.start()
+            except (OSError, RuntimeError, Refused):
+                log.exception("dropping session %s", state.get("sid"))
+                continue
+            self.sessions[session.sid] = session
+        if self.sessions:
+            log.info("restored %d session(s)", len(self.sessions))
+
     def session_by_key(self, key: str) -> Session | None:
         for session in self.sessions.values():
             # The whole key, compared without an early exit: the short id alone
@@ -57,6 +77,7 @@ class Broker:
         session = Session.create(sid, root, clean=clean, background=background)
         await session.start()
         self.sessions[sid] = session
+        self.save()
         return session
 
     def _next_id(self) -> str:
@@ -71,6 +92,7 @@ class Broker:
         if session is None:
             return False
         await session.close()
+        self.save()
         return True
 
     async def close(self) -> None:
@@ -144,7 +166,7 @@ async def _agent_client(
     task = asyncio.current_task()
     if task is not None:
         broker.connections.add(task)
-    server = mcpserver.build(broker.session_by_key)
+    server = mcpserver.build(broker.session_by_key, broker.save)
     try:
         await mcpserver.serve(reader, writer, server)
     except asyncio.CancelledError:
@@ -174,6 +196,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         return
 
     broker = Broker()
+    await broker.restore()
     for socket_path in (paths.admin_socket(), paths.agent_socket()):
         socket_path.unlink(missing_ok=True)
 
@@ -197,6 +220,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
                 connection.cancel()
             await asyncio.gather(*broker.connections, return_exceptions=True)
     finally:
+        # Record where the sessions stood before they go, so the next broker
+        # brings back the same review.
+        broker.save()
         await broker.close()
         for socket_path in (paths.admin_socket(), paths.agent_socket()):
             socket_path.unlink(missing_ok=True)

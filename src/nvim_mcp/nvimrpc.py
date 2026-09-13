@@ -35,6 +35,15 @@ class NvimError(RuntimeError):
     """An error returned by nvim for a request."""
 
 
+class NvimGone(NvimError):
+    """The connection to nvim is closed or broke while sending.
+
+    Distinct from an error nvim itself reported, because a caller can recover
+    from this one by starting nvim again; retrying the other would just repeat
+    a failure.
+    """
+
+
 class NvimRPC:
     def __init__(
         self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
@@ -47,6 +56,10 @@ class NvimRPC:
         self._task = asyncio.create_task(self._read_loop())
         self.on_notification: Callable[[str, list[Any]], None] | None = None
 
+    @property
+    def closed(self) -> bool:
+        return self._closed
+
     @classmethod
     async def connect(cls, socket: Path) -> NvimRPC:
         reader, writer = await asyncio.open_unix_connection(str(socket))
@@ -56,12 +69,20 @@ class NvimRPC:
         # Once the read loop is gone nothing will ever complete a new future, so
         # a request registered after that would wait forever.
         if self._closed:
-            raise NvimError("nvim connection is closed")
+            raise NvimGone("nvim connection is closed")
         msgid = next(self._ids)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[msgid] = future
-        self._writer.write(msgpack.packb([REQUEST, msgid, method, list(params)]))
-        await self._writer.drain()
+        try:
+            self._writer.write(msgpack.packb([REQUEST, msgid, method, list(params)]))
+            await self._writer.drain()
+        except OSError as e:
+            # A failed write means this connection is finished. Say so now, or
+            # a caller that reconnects on NvimGone will find it still looking
+            # alive and retry down the same dead socket.
+            self._closed = True
+            self._pending.pop(msgid, None)
+            raise NvimGone(f"nvim connection broke: {e}") from e
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
@@ -109,7 +130,7 @@ class NvimRPC:
             self._closed = True
             for future in self._pending.values():
                 if not future.done():
-                    future.set_exception(NvimError("nvim connection closed"))
+                    future.set_exception(NvimGone("nvim connection closed"))
             self._pending.clear()
 
     def _dispatch(self, message: list[Any]) -> None:

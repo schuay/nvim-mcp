@@ -39,21 +39,28 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     shutil.rmtree(base, ignore_errors=True)
 
 
-@pytest.fixture
-async def running_broker(runtime: Path) -> AsyncIterator[Path]:
+async def start_broker() -> tuple[asyncio.Event, asyncio.Task[None]]:
     stop = asyncio.Event()
     task = asyncio.create_task(broker.serve(stop))
-    for _ in range(200):
+    for _ in range(500):
         if paths.agent_socket().exists():
-            break
+            return stop, task
         await asyncio.sleep(0.01)
-    else:
-        task.cancel()
-        pytest.fail("broker did not start")
-    yield runtime
-    # Stop rather than cancel: shutting the sessions down runs inside the task.
+    task.cancel()
+    pytest.fail("broker did not start")
+
+
+async def stop_broker(stop: asyncio.Event, task: asyncio.Task[None]) -> None:
     stop.set()
     await asyncio.wait_for(task, 30)
+
+
+@pytest.fixture
+async def running_broker(runtime: Path) -> AsyncIterator[Path]:
+    stop, task = await start_broker()
+    yield runtime
+    # Stop rather than cancel: shutting the sessions down runs inside the task.
+    await stop_broker(stop, task)
 
 
 async def admin(request: dict) -> dict:
