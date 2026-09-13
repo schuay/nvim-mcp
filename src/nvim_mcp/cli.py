@@ -73,7 +73,12 @@ def _session(sid: str) -> dict[str, Any]:
 def cmd_new(args: argparse.Namespace) -> int:
     _ensure_broker()
     reply = _ask(
-        {"cmd": "new", "root": str(Path(args.root).expanduser()), "clean": args.clean}
+        {
+            "cmd": "new",
+            "root": str(Path(args.root).expanduser()),
+            "clean": args.clean,
+            "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
+        }
     )
     if not reply["ok"]:
         raise SystemExit(f"nvim-mcp: {reply['error']}")
@@ -143,7 +148,24 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start nvim without your config and plugins",
     )
-    new.set_defaults(func=cmd_new)
+    # A headless nvim cannot ask the terminal, so it renders the dark palette
+    # into a light one unless told.
+    background = new.add_mutually_exclusive_group()
+    background.add_argument(
+        "--light",
+        dest="background",
+        action="store_const",
+        const="light",
+        help="the terminal you will attach from has a light background",
+    )
+    background.add_argument(
+        "--dark",
+        dest="background",
+        action="store_const",
+        const="dark",
+        help="the terminal you will attach from has a dark background",
+    )
+    new.set_defaults(func=cmd_new, background=None)
 
     sub.add_parser("ls", help="list sessions").set_defaults(func=cmd_ls)
 

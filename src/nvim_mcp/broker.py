@@ -34,7 +34,9 @@ class Broker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         self.clients = 0
-        self._idle_since: float | None = None
+        #: Live client connections. Closing a listener waits for these, so
+        #: shutdown has to end them itself or a connected client pins the broker.
+        self.connections: set[asyncio.Task[None]] = set()
 
     def session_by_key(self, key: str) -> Session | None:
         for session in self.sessions.values():
@@ -43,9 +45,11 @@ class Broker:
                 return session
         return None
 
-    async def new_session(self, root: str, clean: bool = False) -> Session:
+    async def new_session(
+        self, root: str, clean: bool = False, background: str | None = None
+    ) -> Session:
         sid = self._next_id()
-        session = Session.create(sid, root, clean=clean)
+        session = Session.create(sid, root, clean=clean, background=background)
         await session.start()
         self.sessions[sid] = session
         return session
@@ -100,7 +104,7 @@ async def _admin_command(broker: Broker, request: dict[str, Any]) -> dict[str, A
     if command == "new":
         try:
             session = await broker.new_session(
-                request["root"], bool(request.get("clean"))
+                request["root"], bool(request.get("clean")), request.get("background")
             )
         except Refused as e:
             return {"ok": False, "error": str(e)}
@@ -132,14 +136,20 @@ async def _admin_command(broker: Broker, request: dict[str, Any]) -> dict[str, A
 async def _agent_client(
     broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
+    task = asyncio.current_task()
     broker.clients += 1
+    if task is not None:
+        broker.connections.add(task)
     server = mcpserver.build(broker.session_by_key)
     try:
         await mcpserver.serve(reader, writer, server)
+    except asyncio.CancelledError:
+        raise
     except Exception:
         log.exception("agent connection failed")
     finally:
         broker.clients -= 1
+        broker.connections.discard(task)
         writer.close()
 
 
@@ -180,6 +190,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
     try:
         async with admin, agent:
             await _until_idle(broker, stop)
+            for connection in list(broker.connections):
+                connection.cancel()
+            await asyncio.gather(*broker.connections, return_exceptions=True)
     finally:
         await broker.close()
         for socket_path in (paths.admin_socket(), paths.agent_socket()):

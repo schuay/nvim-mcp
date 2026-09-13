@@ -52,9 +52,9 @@ SHOW_TOOL = types.Tool(
     title="Show code to the human",
     description=(
         "Open locations in the human's nvim session: a tab per file, a quickfix "
-        "list of the positions, and a highlight over any range. Batch every "
-        "location you are discussing into one call. Replaces the previous show; "
-        "never closes a tab."
+        "list of the positions, a highlight over any range, and each note "
+        "rendered above its line. Batch every location you are discussing into "
+        "one call. Replaces the previous show; never closes a tab."
     ),
     input_schema={
         "type": "object",
@@ -63,7 +63,7 @@ SHOW_TOOL = types.Tool(
             "title": {"type": "string", "description": "Label for the quickfix list"},
             "focus": {
                 "type": "boolean",
-                "description": "Jump the human's view to the first location. Default false.",
+                "description": "Jump the human's view to the first location. Default true.",
             },
             "session": {
                 "type": "string",

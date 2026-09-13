@@ -54,8 +54,8 @@ def splice_script() -> Path:
     return agent_dir() / "splice.py"
 
 
-def nvim_socket(session_id: str) -> Path:
-    return runtime_dir() / f"nvim-{session_id}.sock"
+def nvim_socket(session_key: str) -> Path:
+    return runtime_dir() / f"nvim-{session_key}.sock"
 
 
 def lock_path() -> Path:

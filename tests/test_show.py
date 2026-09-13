@@ -53,16 +53,23 @@ async def test_show_opens_a_tab_per_file_and_lists_positions(
           title = vim.fn.getqflist({ title = 0 }).title,
           items = #vim.fn.getqflist(),
           switchbuf = vim.o.switchbuf,
-          marks = #vim.api.nvim_buf_get_extmarks(
+          marks = vim.api.nvim_buf_get_extmarks(
             vim.fn.bufnr('src/main.c'),
-            vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, {}),
+            vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, { details = true }),
         }
     """)
     assert state["tabs"] == 2
     assert state["title"] == "review"
     assert state["items"] == 2
     assert state["switchbuf"] == "usetab,newtab"
-    assert state["marks"] == 1
+    details = [mark[3] for mark in state["marks"]]
+    assert [d for d in details if d.get("hl_group") == "NvimMcpShow"], (
+        "no range highlight"
+    )
+    notes = [d["virt_lines"] for d in details if "virt_lines" in d]
+    # The trailing empty chunk stretches the note's background to the end of the
+    # screen line, so it reads as a band instead of a run of coloured text.
+    assert notes == [[[["  here", "NvimMcpNote"], ["", "NvimMcpNote"]]]]
     await nvim.close()
     await wire.close()
 
@@ -129,4 +136,31 @@ async def test_an_unknown_session_key_is_rejected(
         "show", {"session": "1", "locations": [{"file": "README.md"}]}
     )
     assert result["isError"] is True
+    await wire.close()
+
+
+async def test_a_range_past_the_end_of_the_file_still_highlights(
+    running_broker: Path, repo: Path
+) -> None:
+    lines = len((repo / "src" / "main.c").read_text().splitlines())
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    await show(
+        wire,
+        session["key"],
+        locations=[{"file": "src/main.c", "line": lines - 1, "end_line": lines + 40}],
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    mark = await nvim.lua("""
+        return vim.api.nvim_buf_get_extmarks(
+          vim.fn.bufnr('src/main.c'),
+          vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, { details = true })[1]
+    """)
+    row, details = mark[1], mark[3]
+    assert row == lines - 2
+    assert details["end_row"] == lines - 1, (
+        "the highlight collapsed instead of truncating"
+    )
+    await nvim.close()
     await wire.close()
