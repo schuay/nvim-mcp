@@ -267,3 +267,50 @@ async def test_acking_an_id_that_names_no_mark_is_reported(
     clean = await call(wire, "read", session=session["key"], what="marks")
     assert "unknown_ack" not in clean
     await wire.close()
+
+
+async def signs(nvim: NvimRPC) -> int:
+    """How many questions are still marked in the editor."""
+    return await nvim.lua("""
+        local n = 0
+        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.api.nvim_buf_is_loaded(buf) then
+            n = n + #vim.api.nvim_buf_get_extmarks(
+              buf, vim.api.nvim_create_namespace('nvim-mcp-ask'), 0, -1, {})
+          end
+        end
+        return n
+    """)
+
+
+async def test_a_question_stays_marked_until_it_is_answered(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket(), key=session["key"])
+    await review(wire, session["key"])
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    await nvim.request("nvim_command", "edit src/main.c")
+    await nvim.request("nvim_command", "2Ask look at this")
+    await nvim.request("nvim_command", "3Ask and this")
+    assert await signs(nvim) == 2
+
+    # Reading is not answering, and neither is a redraw. The signs used to go
+    # on the next sync, which left a batch of replies looking answered the
+    # moment the agent collected them.
+    marks = await call(wire, "read", session=session["key"], what="marks")
+    await review(wire, session["key"])
+    assert await signs(nvim) == 2
+
+    await call(
+        wire,
+        "read",
+        session=session["key"],
+        what="marks",
+        ack=[marks["marks"][0]["id"]],
+    )
+    await review(wire, session["key"])
+    assert await signs(nvim) == 1
+    await nvim.close()
+    await wire.close()

@@ -287,7 +287,7 @@ class Session:
             # After a restart this is what puts the review back in front of
             # the human. Nobody is attached yet, so there is no view to preserve.
             if self.frames:
-                await self._draw(focus=True)
+                await self._draw(focus=True, restoring=True)
         elif outcome == "adopted":
             # nvim has been on its own: it may hold moved notes and questions
             # asked while no broker was listening.
@@ -298,27 +298,52 @@ class Session:
             if list(shown or []) != [note.id for note in self.notes]:
                 await self._draw(focus=False)
 
-    async def _draw(self, focus: bool, open_files: bool = True) -> dict[str, Any]:
+    async def _draw(
+        self, focus: bool, open_files: bool = True, restoring: bool = False
+    ) -> dict[str, Any]:
         assert self.rpc is not None
         result = await self.rpc.lua(
-            SHOW, self._frames_for_lua(), {"focus": focus, "open": open_files}
+            SHOW,
+            self._frames_for_lua(),
+            {
+                "focus": focus,
+                "open": open_files,
+                # Every frame's files, not just the top one's: nothing is
+                # loaded yet, and a frame that draws into no buffer is gone
+                # from the screen while still in the record.
+                "open_all": restoring,
+                # A question is marked until an agent acknowledges it, so nvim
+                # has to be told which are still waiting.
+                "pending": [
+                    mark["ask"]
+                    for mark in self.marks
+                    if mark.get("ask") and not mark.get("acked")
+                ],
+            },
         )
         self._absorb(result["sync"])
         return result
 
     async def _attempt(self, action: Callable[[], Awaitable[Any]]) -> Any:
+        """Run one exchange with nvim under the session lock."""
+        async with self._lock:
+            return await self._exchange(action)
+
+    async def _exchange(self, action: Callable[[], Awaitable[Any]]) -> Any:
         """Run one exchange with nvim, starting it again if it has gone.
 
         A session can die between two calls, and the failure surfaces only when
-        the next one is sent.
+        the next one is sent. The caller holds the lock: an operation that
+        changes the record has to hold it from before the change until after
+        the answer is built, or a second caller changes the record underneath
+        it and both are answered with the same result.
         """
-        async with self._lock:
+        await self._ensure()
+        try:
+            return await action()
+        except NvimGone:
             await self._ensure()
-            try:
-                return await action()
-            except NvimGone:
-                await self._ensure()
-                return await action()
+            return await action()
 
     async def show(
         self,
@@ -333,7 +358,22 @@ class Session:
         it, `pop` removes it. The record changes first: if nvim has to be
         started for this call, startup draws the record, and this call then
         draws it again.
+
+        Held under the lock from the change to the answer. Two agents can
+        share a session -- two boxes in one tree do, deliberately -- and
+        changing the frames before taking it left both calls reporting the
+        same notes, with one caller's gone.
         """
+        async with self._lock:
+            return await self._show(locations, title, focus, frame)
+
+    async def _show(
+        self,
+        locations: list[Location],
+        title: str,
+        focus: bool,
+        frame: str,
+    ) -> dict[str, Any]:
         popped = None
         if frame == "pop":
             popped = self._pop(None).letter
@@ -361,7 +401,7 @@ class Session:
             await self.rpc.request("nvim_command", "checktime")
             return await self._draw(focus=focus, open_files=frame != "pop")
 
-        result = await self._attempt(run)
+        result = await self._exchange(run)
         # Nothing on screen and something worth seeing: the show already told
         # us how many UIs nvim has, so this costs no extra round trip.
         result["opened_ui"] = not result.get("uis") and self.editor.open_window()
@@ -370,6 +410,12 @@ class Session:
         result["ids"] = (
             [note.id for note in top.notes] if top and frame != "pop" else []
         )
+        # The stack as this call left it. Read after the lock, it would be
+        # whatever the next caller has done since.
+        result["frames"] = [
+            {"letter": f.letter, "title": f.title, "notes": len(f.notes)}
+            for f in self.frames
+        ]
         return result
 
     def _push(self) -> Frame:

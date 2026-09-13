@@ -244,3 +244,57 @@ async def test_the_wire_carries_frames(running_broker: Path, repo: Path) -> None
     assert empty["isError"] is True
     assert "no frame to pop" in empty["content"][0]["text"]
     await wire.close()
+
+
+async def test_a_frame_change_keeps_where_the_human_moved_a_note(
+    session: Session, human: NvimRPC, repo: Path
+) -> None:
+    await session.show([main_c(repo, 3, "review")], "review", True)
+    await human.lua("""
+        vim.cmd('edit src/main.c')
+        vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'inserted' })
+    """)
+
+    # A push, a pop and a replace all redraw. Each used to clear the anchors
+    # before anything read them, putting the note back on the line the broker
+    # last saw it on and the explanation against the wrong code.
+    aside = Location(repo / "README.md", line=1, text="aside")
+    await session.show([aside], "aside", False, frame="push")
+    assert session.frames[0].notes[0].line == 4
+    assert await bands(human) == ["A1  review"]
+
+    await session.show([], "ignored", False, frame="pop")
+    assert session.frames[0].notes[0].line == 4
+
+    await human.lua("vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'another' })")
+    await session.show([main_c(repo, 3, "second look")], "again", False)
+    # A replace gives the top frame new notes, so the old anchor goes with the
+    # note it belonged to.
+    assert session.frames[0].notes[0].line == 3
+
+
+async def test_a_restart_opens_every_frames_files(
+    session: Session, human: NvimRPC, repo: Path
+) -> None:
+    await session.show([main_c(repo, 2, "review")], "review", False)
+    aside = Location(repo / "README.md", line=1, text="aside")
+    await session.show([aside], "aside", False, frame="push")
+
+    process = session.editor.process
+    assert process is not None
+    await human.notify("nvim_command", "qall!")
+    await process.wait()
+    await session.ensure()
+
+    again = await NvimRPC.connect(session.socket)
+    loaded = await again.lua("""
+        return {
+          main = vim.fn.bufloaded(vim.fn.bufnr('src/main.c')) == 1,
+          readme = vim.fn.bufloaded(vim.fn.bufnr('README.md')) == 1,
+        }
+    """)
+    # A restart loads nothing of its own, so the base frame used to come back
+    # in the record and nowhere else: no buffer, no band, no code to read.
+    assert loaded == {"main": True, "readme": True}
+    assert await bands(again) == ["A1  review"]
+    await again.close()

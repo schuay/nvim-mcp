@@ -136,6 +136,10 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
     popped: str | None = None
     opened_ui: bool | None = None
     frame = session.frames[-1].letter if session.frames else None
+    frames = [
+        FrameSummary(letter=f.letter, title=f.title, notes=len(f.notes))
+        for f in session.frames
+    ]
     attached = await session.attached()
     if locations or request.frame == "pop":
         result = await session.show(
@@ -146,6 +150,9 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         frame = result["frame"]
         popped = result["popped"]
         opened_ui = result["opened_ui"] or None
+        # Taken under the session's lock, so it describes this call rather
+        # than whatever another agent did while this one was answering.
+        frames = [FrameSummary(**summary) for summary in result["frames"]]
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
@@ -156,10 +163,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         popped=popped,
         opened_ui=opened_ui,
         ids=ids,
-        frames=[
-            FrameSummary(letter=f.letter, title=f.title, notes=len(f.notes))
-            for f in session.frames
-        ],
+        frames=frames,
         opened=opened,
         refused=refused,
     )

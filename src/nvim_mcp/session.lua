@@ -29,6 +29,11 @@ M.anchors = M.anchors or {}
 --- Marks the broker has not received: only those made while its channel was
 --- closed. They go out with the next sync.
 M.pending = M.pending or {}
+--- The sign extmark per question, by a number this side counts. A question
+--- keeps its sign until the broker says an agent acknowledged it, so the
+--- human writing a batch of replies can see which are still waiting.
+M.asks = M.asks or {}
+M.ask_seq = M.ask_seq or 0
 M.ns = vim.api.nvim_create_namespace('nvim-mcp-show')
 M.anchor_ns = vim.api.nvim_create_namespace('nvim-mcp-anchor')
 M.ask_ns = vim.api.nvim_create_namespace('nvim-mcp-ask')
@@ -319,9 +324,6 @@ end
 function M.sync()
   local marks = M.pending
   M.pending = {}
-  for _, buf in ipairs(loaded_buffers()) do
-    vim.api.nvim_buf_clear_namespace(buf, M.ask_ns, 0, -1)
-  end
   return { positions = M.positions(), marks = marks }
 end
 
@@ -355,15 +357,65 @@ end
 
 --- Draw the broker's frames. The top frame's files are opened and its
 --- positions fill the quickfix list; lower frames render wherever their
---- files are already loaded.
+--- files are already loaded, plus whatever a restart has to put back.
+local function open_buffer(file, buf, seen, opened, focus)
+  vim.fn.bufload(buf)
+  -- bufadd leaves a buffer unlisted, which hides it from :ls and from
+  -- anything asking nvim what is open.
+  vim.bo[buf].buflisted = true
+  if seen[file] then return end
+  seen[file] = true
+  opened[#opened + 1] = file
+  if displayed(buf) then return end
+  -- An empty window is taken over only when the human is being brought here
+  -- anyway. With focus off, replacing the buffer in front of them is a change
+  -- they did not ask for, and restoring the tabpage afterwards does not undo it.
+  if not (focus and scratch(vim.api.nvim_get_current_win())) then vim.cmd('tabnew') end
+  vim.api.nvim_win_set_buf(0, buf)
+end
+
+--- Drop the sign on questions an agent has answered. A question is marked
+--- until it is acknowledged rather than until it is delivered: the human
+--- writes a batch and hands it over, and the ones still waiting have to look
+--- different from the ones that came back.
+local function settle_asks(pending)
+  if pending == nil then return end
+  local waiting = {}
+  for _, id in ipairs(pending) do waiting[id] = true end
+  for id, ask in pairs(M.asks) do
+    if not waiting[id] then
+      pcall(vim.api.nvim_buf_del_extmark, ask.buf, M.ask_ns, ask.mark)
+      M.asks[id] = nil
+    end
+  end
+end
+
 function M.show(new_frames, show_opts)
   local previous = vim.api.nvim_get_current_tabpage()
+  -- Where the human's edits have left the notes. The anchors are the only
+  -- record of that and this is the last moment to read them: a note that
+  -- survives the change keeps its anchor, and clearing the lot here used to
+  -- put it back on whichever line the broker last saw it on.
+  local live = {}
+  for _, at in ipairs(M.positions()) do live[at.id] = at end
   for _, buf in ipairs(loaded_buffers()) do
     vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
-    vim.api.nvim_buf_clear_namespace(buf, M.anchor_ns, 0, -1)
   end
-  M.anchors = {}
   M.frames = new_frames
+  local kept = {}
+  for _, entry in ipairs(notes()) do
+    local note = entry.note
+    kept[note.id] = true
+    local at = live[note.id]
+    if at then note.line, note.end_line = at.line, at.end_line end
+  end
+  for id, existing in pairs(M.anchors) do
+    if not kept[id] then
+      pcall(vim.api.nvim_buf_del_extmark, existing.buf, M.anchor_ns, existing.mark)
+      M.anchors[id] = nil
+    end
+  end
+  settle_asks(show_opts.pending)
   local top = new_frames[#new_frames]
   local items, opened, seen = {}, {}, {}
   for _, note in ipairs(top and top.notes or {}) do
@@ -371,18 +423,7 @@ function M.show(new_frames, show_opts)
     -- backticks in it and run a shell.
     local buf = vim.fn.bufadd(note.file)
     if show_opts.open then
-      vim.fn.bufload(buf)
-      -- bufadd leaves a buffer unlisted, which hides it from :ls and from
-      -- anything asking nvim what is open.
-      vim.bo[buf].buflisted = true
-      if not seen[note.file] then
-        seen[note.file] = true
-        opened[#opened + 1] = note.file
-        if not displayed(buf) then
-          if not scratch(vim.api.nvim_get_current_win()) then vim.cmd('tabnew') end
-          vim.api.nvim_win_set_buf(0, buf)
-        end
-      end
+      open_buffer(note.file, buf, seen, opened, show_opts.focus)
     end
     if vim.api.nvim_buf_is_loaded(buf) then
       local lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf)))
@@ -398,6 +439,18 @@ function M.show(new_frames, show_opts)
         type = 'N',
         text = label .. clip(note.text or '', math.max(20, room)),
       }
+    end
+  end
+
+  -- A restart has nothing loaded, so a lower frame would draw into no buffer
+  -- at all: still in the record, gone from the screen. Its files are opened
+  -- without focus, behind the frame the human is meant to be reading.
+  if show_opts.open_all then
+    for _, entry in ipairs(notes()) do
+      local file = entry.note.file
+      if not seen[file] then
+        open_buffer(file, vim.fn.bufadd(file), seen, opened, false)
+      end
     end
   end
 
@@ -540,7 +593,9 @@ vim.api.nvim_create_user_command('Ask', function(o)
   local text = table.concat(vim.api.nvim_buf_get_lines(buf, o.line1 - 1, o.line2, false), '\n')
   local truncated = #text > M.text_limit
   if truncated then text = cut(text, M.text_limit) end
+  M.ask_seq = M.ask_seq + 1
   local mark = {
+    ask = M.ask_seq,
     file = vim.api.nvim_buf_get_name(buf),
     line1 = o.line1,
     line2 = o.line2,
@@ -554,10 +609,13 @@ vim.api.nvim_create_user_command('Ask', function(o)
   -- recorded before this nvim can be quit. Otherwise held for the next sync.
   local delivered = pcall(vim.rpcnotify, M.chan, 'nvim-mcp', 'ask', mark)
   if not delivered then M.pending[#M.pending + 1] = mark end
-  vim.api.nvim_buf_set_extmark(buf, M.ask_ns, o.line1 - 1, 0, {
-    end_row = o.line2 - 1, end_col = 0, sign_text = '?>', sign_hl_group = 'NvimMcpAsk',
-    line_hl_group = 'NvimMcpAsk', strict = false,
-  })
+  M.asks[M.ask_seq] = {
+    buf = buf,
+    mark = vim.api.nvim_buf_set_extmark(buf, M.ask_ns, o.line1 - 1, 0, {
+      end_row = o.line2 - 1, end_col = 0, sign_text = '?>', sign_hl_group = 'NvimMcpAsk',
+      line_hl_group = 'NvimMcpAsk', strict = false,
+    }),
+  }
   vim.notify(delivered and 'nvim-mcp: question handed to the agent'
              or 'nvim-mcp: broker away, question kept for it')
 end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' })
