@@ -4,7 +4,6 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 .coverage
-/uv.lock
 
 # Agent instruction files stay local to the checkout.
 /CLAUDE.md

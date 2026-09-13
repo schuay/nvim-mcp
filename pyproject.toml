@@ -20,7 +20,8 @@ classifiers = [
 dependencies = [
     # The broker speaks msgpack-RPC to nvim and MCP to its clients.
     "msgpack>=1.0",
-    "mcp>=1.2",
+    # mcp_types and the constructor-handler Server are SDK 2 interfaces.
+    "mcp>=2",
 ]
 
 [project.scripts]
@@ -84,7 +85,8 @@ ignore = [
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-m 'not nvim'"
+# The nvim tests are the ones that test the product, so they run by default.
+# Deselect with `-m 'not nvim'` on a host without nvim.
 markers = [
     "nvim: drives a real nvim process installed on the host",
 ]

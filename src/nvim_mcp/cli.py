@@ -4,9 +4,8 @@
 """`nv`: create sessions, attach a terminal to one, and inspect them.
 
 Sessions are created here rather than by a client, because the root a session is
-clamped to has to come from the human. Spawning nvim from this process also
-gives the session the human's environment, which a daemon-spawned one would not
-inherit.
+clamped to has to come from the human. The broker spawns nvim, so the session
+inherits the broker's environment, not this shell's.
 """
 
 from __future__ import annotations
@@ -75,7 +74,9 @@ def cmd_new(args: argparse.Namespace) -> int:
     reply = _ask(
         {
             "cmd": "new",
-            "root": str(Path(args.root).expanduser()),
+            # Resolved here: the broker's cwd is whichever shell first started
+            # it, and a relative root would be taken against that.
+            "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
             "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
         }

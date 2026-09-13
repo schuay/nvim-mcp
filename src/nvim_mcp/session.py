@@ -476,6 +476,10 @@ class Session:
     title: str = "agent"
     process: asyncio.subprocess.Process | None = None
     rpc: NvimRPC | None = None
+    #: Orders every exchange with nvim, including starting it. Two callers
+    #: that find the session dead at the same moment would otherwise each
+    #: spawn an nvim, and only one of them would be the session's.
+    _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
     @classmethod
     def create(
@@ -526,7 +530,7 @@ class Session:
         session.title = state.get("title", "agent")
         return session
 
-    async def start(self) -> None:
+    async def _start(self) -> None:
         self.socket.unlink(missing_ok=True)
         self.process = await asyncio.create_subprocess_exec(
             "nvim",
@@ -594,6 +598,10 @@ class Session:
         `:q` in an attached UI kills the server outright, and the human has no
         reason to know that ends the review.
         """
+        async with self._lock:
+            await self._ensure()
+
+    async def _ensure(self) -> None:
         if self.alive:
             return
         if self.rpc is not None:
@@ -602,7 +610,7 @@ class Session:
         if self.process is not None and self.process.returncode is None:
             self.process.kill()
             await self.process.wait()
-        await self.start()
+        await self._start()
 
     async def _attempt(self, action: Callable[[], Awaitable[Any]]) -> Any:
         """Run one exchange with nvim, starting it again if it has gone.
@@ -610,12 +618,13 @@ class Session:
         A session can die between two calls, and the failure surfaces only when
         the next one is sent.
         """
-        await self.ensure()
-        try:
-            return await action()
-        except NvimGone:
-            await self.ensure()
-            return await action()
+        async with self._lock:
+            await self._ensure()
+            try:
+                return await action()
+            except NvimGone:
+                await self._ensure()
+                return await action()
 
     async def show(
         self, locations: list[Location], title: str, focus: bool
@@ -664,23 +673,32 @@ class Session:
             self.marks.append(mark)
 
     async def attached(self) -> bool:
-        async def run() -> Any:
-            assert self.rpc is not None
-            return await self.rpc.request("nvim_list_uis")
+        """Report whether a UI is on this session's nvim.
 
-        return bool(await self._attempt(run))
+        A dead nvim has no UI. Asking must not start one: `nv ls` asks about
+        every session, and listing them is not a reason to bring them back.
+        """
+        async with self._lock:
+            if not self.alive:
+                return False
+            assert self.rpc is not None
+            try:
+                return bool(await self.rpc.request("nvim_list_uis"))
+            except NvimGone:
+                return False
 
     async def close(self) -> None:
-        if self.rpc is not None:
-            with contextlib.suppress(Exception):
-                await self.rpc.notify("nvim_command", "qall!")
-            await self.rpc.close()
-            self.rpc = None
-        if self.process is not None:
-            with contextlib.suppress(TimeoutError):
-                await asyncio.wait_for(self.process.wait(), 3)
-            if self.process.returncode is None:
-                self.process.kill()
-                await self.process.wait()
-            self.process = None
-        self.socket.unlink(missing_ok=True)
+        async with self._lock:
+            if self.rpc is not None:
+                with contextlib.suppress(Exception):
+                    await self.rpc.notify("nvim_command", "qall!")
+                await self.rpc.close()
+                self.rpc = None
+            if self.process is not None:
+                with contextlib.suppress(TimeoutError):
+                    await asyncio.wait_for(self.process.wait(), 3)
+                if self.process.returncode is None:
+                    self.process.kill()
+                    await self.process.wait()
+                self.process = None
+            self.socket.unlink(missing_ok=True)

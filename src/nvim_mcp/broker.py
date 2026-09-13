@@ -37,6 +37,10 @@ class Broker:
         #: Live client connections. Closing a listener waits for these, so
         #: shutdown has to end them itself or a connected client pins the broker.
         self.connections: set[asyncio.Task[None]] = set()
+        #: Held while the registry changes. Creating a session awaits nvim
+        #: startup, and two creations that pick an id before either has
+        #: registered would pick the same one.
+        self._lock = asyncio.Lock()
 
     @property
     def clients(self) -> int:
@@ -51,16 +55,17 @@ class Broker:
         A session usually outlives the broker that made it: its review is
         waiting for a human who has not arrived yet.
         """
-        for state in store.load():
-            try:
-                session = Session.restore(state)
-                await session.start()
-            except (OSError, RuntimeError, Refused):
-                log.exception("dropping session %s", state.get("sid"))
-                continue
-            self.sessions[session.sid] = session
-        if self.sessions:
-            log.info("restored %d session(s)", len(self.sessions))
+        async with self._lock:
+            for state in store.load():
+                try:
+                    session = Session.restore(state)
+                    await session.ensure()
+                except (OSError, RuntimeError, Refused):
+                    log.exception("dropping session %s", state.get("sid"))
+                    continue
+                self.sessions[session.sid] = session
+            if self.sessions:
+                log.info("restored %d session(s)", len(self.sessions))
 
     def session_by_key(self, key: str) -> Session | None:
         for session in self.sessions.values():
@@ -73,12 +78,13 @@ class Broker:
     async def new_session(
         self, root: str, clean: bool = False, background: str | None = None
     ) -> Session:
-        sid = self._next_id()
-        session = Session.create(sid, root, clean=clean, background=background)
-        await session.start()
-        self.sessions[sid] = session
-        self.save()
-        return session
+        async with self._lock:
+            sid = self._next_id()
+            session = Session.create(sid, root, clean=clean, background=background)
+            await session.ensure()
+            self.sessions[sid] = session
+            self.save()
+            return session
 
     def _next_id(self) -> str:
         used = {int(sid) for sid in self.sessions}
@@ -88,12 +94,13 @@ class Broker:
         return str(candidate)
 
     async def kill(self, sid: str) -> bool:
-        session = self.sessions.pop(sid, None)
-        if session is None:
-            return False
-        await session.close()
-        self.save()
-        return True
+        async with self._lock:
+            session = self.sessions.pop(sid, None)
+            if session is None:
+                return False
+            await session.close()
+            self.save()
+            return True
 
     async def close(self) -> None:
         for session in list(self.sessions.values()):
