@@ -74,3 +74,11 @@ def nvim_socket(session_key: str) -> Path:
 
 def lock_path() -> Path:
     return runtime_dir() / "broker.lock"
+
+
+def broker_log() -> Path:
+    return state_dir() / "broker.log"
+
+
+def nvim_log(sid: str) -> Path:
+    return state_dir() / f"nvim-{sid}.log"

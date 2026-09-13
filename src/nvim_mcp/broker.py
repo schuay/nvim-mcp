@@ -50,21 +50,25 @@ class Broker:
         store.save([session.state() for session in self.sessions.values()])
 
     async def restore(self) -> None:
-        """Start the sessions a previous broker left behind.
+        """Take over the sessions a previous broker left behind.
 
-        A session usually outlives the broker that made it: its review is
-        waiting for a human who has not arrived yet.
+        Their nvims are usually still running, with the human attached, and
+        are adopted now so their questions have somewhere to go. One that has
+        gone is started again when something next needs it.
         """
         async with self._lock:
             for state in store.load():
                 try:
                     session = Session.restore(state)
-                    session.on_change = self.save
-                    await session.ensure()
-                except (OSError, RuntimeError, Refused):
-                    log.exception("dropping session %s", state.get("sid"))
+                except (KeyError, TypeError, ValueError, Refused):
+                    log.exception("cannot restore session %s", state.get("sid"))
                     continue
+                session.on_change = self.save
                 self.sessions[session.sid] = session
+                try:
+                    await session.ensure(spawn=False)
+                except (OSError, RuntimeError):
+                    log.exception("session %s: could not adopt its nvim", session.sid)
             if self.sessions:
                 log.info("restored %d session(s)", len(self.sessions))
 
@@ -77,11 +81,17 @@ class Broker:
         return None
 
     async def new_session(
-        self, root: str, clean: bool = False, background: str | None = None
+        self,
+        root: str,
+        clean: bool = False,
+        background: str | None = None,
+        env: dict[str, str] | None = None,
     ) -> Session:
         async with self._lock:
             sid = self._next_id()
-            session = Session.create(sid, root, clean=clean, background=background)
+            session = Session.create(
+                sid, root, clean=clean, background=background, env=env
+            )
             session.on_change = self.save
             await session.ensure()
             self.sessions[sid] = session
@@ -104,9 +114,21 @@ class Broker:
             self.save()
             return True
 
+    async def attach(self, sid: str) -> Session | None:
+        """Have a session's nvim running so a terminal can attach to it."""
+        session = self.sessions.get(sid)
+        if session is not None:
+            await session.ensure()
+        return session
+
     async def close(self) -> None:
+        """Let go of every session's nvim without stopping it.
+
+        The human may be attached, with unsaved edits. The next broker adopts
+        what this one leaves running.
+        """
         for session in list(self.sessions.values()):
-            await session.close()
+            await session.detach()
         self.sessions.clear()
 
 
@@ -135,38 +157,69 @@ async def _admin_client(
 
 async def _admin_command(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
     command = request.get("cmd")
-    if command == "ping":
-        return {"ok": True}
-    if command == "new":
-        try:
-            session = await broker.new_session(
-                request["root"], bool(request.get("clean")), request.get("background")
-            )
-        except Refused as e:
-            return {"ok": False, "error": str(e)}
-        return {
-            "ok": True,
-            "id": session.sid,
-            "key": session.key,
-            "root": str(session.root.path),
-            "socket": str(session.socket),
-        }
-    if command == "ls":
-        listing = []
-        for session in broker.sessions.values():
-            listing.append(
-                {
-                    "id": session.sid,
-                    "key": session.key,
-                    "root": str(session.root.path),
-                    "socket": str(session.socket),
-                    "attached": await session.attached(),
-                }
-            )
-        return {"ok": True, "sessions": listing}
-    if command == "kill":
-        return {"ok": await broker.kill(str(request["id"]))}
-    return {"ok": False, "error": f"unknown command: {command}"}
+    handler = ADMIN_COMMANDS.get(str(command))
+    if handler is None:
+        return {"ok": False, "error": f"unknown command: {command}"}
+    try:
+        return {"ok": True, **await handler(broker, request)}
+    except Refused as e:
+        return {"ok": False, "error": str(e)}
+
+
+async def _ping(_broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
+    return {}
+
+
+async def _new(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
+    session = await broker.new_session(
+        request["root"],
+        bool(request.get("clean")),
+        request.get("background"),
+        request.get("env"),
+    )
+    return {
+        "id": session.sid,
+        "key": session.key,
+        "root": str(session.root.path),
+        "socket": str(session.socket),
+    }
+
+
+async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
+    listing = []
+    for session in broker.sessions.values():
+        listing.append(
+            {
+                "id": session.sid,
+                "key": session.key,
+                "root": str(session.root.path),
+                "socket": str(session.socket),
+                "attached": await session.attached(),
+            }
+        )
+    return {"sessions": listing}
+
+
+async def _attach(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
+    session = await broker.attach(str(request["id"]))
+    if session is None:
+        raise Refused(f"no session {request['id']}")
+    return {"socket": str(session.socket)}
+
+
+async def _kill(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
+    if not await broker.kill(str(request["id"])):
+        raise Refused(f"no session {request['id']}")
+    return {}
+
+
+ADMIN_COMMANDS = {
+    "ping": _ping,
+    "new": _new,
+    "ls": _ls,
+    "attach": _attach,
+    "kill": _kill,
+}
 
 
 async def _agent_client(

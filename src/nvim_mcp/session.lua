@@ -19,15 +19,16 @@ local M = _G.NvimMcp
 M.chan = opts.chan
 M.text_limit = opts.text_limit
 --- The notes the broker last sent, cached so a buffer read again can be
---- redrawn without a round trip. Their lines follow the anchors.
-M.notes = notes or {}
+--- redrawn without a round trip. Their lines follow the anchors. A broker
+--- that adopts a running nvim sends none and takes what is here.
+M.notes = notes or M.notes or {}
 --- Anchor extmark per note id, in the buffer holding the note. Created when
 --- the buffer is first drawn and never cleared by a redraw, so it is the one
 --- thing that keeps tracking the human's edits.
-M.anchors = {}
+M.anchors = M.anchors or {}
 --- Marks the broker has not received: only those made while its channel was
 --- closed. They go out with the next sync.
-M.pending = {}
+M.pending = M.pending or {}
 M.ns = vim.api.nvim_create_namespace('nvim-mcp-show')
 M.anchor_ns = vim.api.nvim_create_namespace('nvim-mcp-anchor')
 M.ask_ns = vim.api.nvim_create_namespace('nvim-mcp-ask')

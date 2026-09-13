@@ -6,6 +6,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import subprocess
 import tempfile
 from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
@@ -36,15 +37,23 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
     monkeypatch.setenv("NVIM_MCP_AGENT_DIR", str(base / "agent"))
     yield base
+    # A stopped broker leaves its nvims running on purpose. Nothing adopts
+    # them after the test, so end them by the socket path only they listen on.
+    subprocess.run(["pkill", "-f", f"^nvim .*--listen {base}/"], check=False)
     shutil.rmtree(base, ignore_errors=True)
 
 
 async def start_broker() -> tuple[asyncio.Event, asyncio.Task[None]]:
     stop = asyncio.Event()
     task = asyncio.create_task(broker.serve(stop))
+    # Ready means answering, not a socket file: a broker that was killed
+    # leaves its files behind, and the next one unlinks them only as it binds.
     for _ in range(500):
-        if paths.agent_socket().exists():
-            return stop, task
+        try:
+            if (await admin({"cmd": "ping"}))["ok"]:
+                return stop, task
+        except OSError:
+            pass
         await asyncio.sleep(0.01)
     task.cancel()
     pytest.fail("broker did not start")

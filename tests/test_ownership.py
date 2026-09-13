@@ -92,7 +92,7 @@ async def test_positions_survive_the_human_quitting(
 ) -> None:
     await insert_above(human)
     await human.lua("vim.cmd('write')")
-    first = session.process
+    first = session.editor.process
     assert first is not None
     await human.notify("nvim_command", "qall!")
     await first.wait()
@@ -123,7 +123,7 @@ async def test_a_question_reaches_the_record_as_it_is_asked(
 async def test_a_question_survives_the_human_quitting_at_once(
     session: Session, human: NvimRPC
 ) -> None:
-    first = session.process
+    first = session.editor.process
     assert first is not None
     await human.request("nvim_command", "3Ask gone?")
     await human.notify("nvim_command", "qall!")
@@ -150,7 +150,7 @@ async def test_nvim_still_exits_when_the_broker_is_away(
     session: Session, human: NvimRPC
 ) -> None:
     await human.lua("NvimMcp.chan = 9999")
-    process = session.process
+    process = session.editor.process
     assert process is not None
     await human.notify("nvim_command", "qall!")
     await asyncio.wait_for(process.wait(), 5)

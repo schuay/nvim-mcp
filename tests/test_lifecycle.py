@@ -63,7 +63,7 @@ async def test_asking_whether_a_dead_session_is_attached_does_not_revive_it(
 ) -> None:
     session = Session.create("1", repo, clean=True)
     await session.ensure()
-    first = session.process
+    first = session.editor.process
     assert first is not None
 
     nvim = await NvimRPC.connect(session.socket)
@@ -72,5 +72,5 @@ async def test_asking_whether_a_dead_session_is_attached_does_not_revive_it(
     await first.wait()
 
     assert await session.attached() is False
-    assert session.process is first, "listing the session started a new nvim"
+    assert session.editor.process is first, "listing the session started a new nvim"
     await session.close()

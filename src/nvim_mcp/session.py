@@ -12,6 +12,10 @@ back. nvim draws that record and reports the two things only it can know:
 where a note has moved to as the human edits, and what the human asked. Both
 arrive as a sync with every exchange, and nvim hands over a final one before
 it exits. Notes carry nothing of nvim's, so the record survives it.
+
+The nvim itself is the Editor's concern: it may be one this broker spawned or
+one left running by a previous broker, and the session only has to know which
+it got, to set up a fresh one or catch up with an adopted one.
 """
 
 from __future__ import annotations
@@ -26,8 +30,9 @@ from pathlib import Path
 from typing import Any
 
 from .clamp import Root
+from .lifecycle import Editor
 from .nvimrpc import NvimGone, NvimRPC
-from .paths import nvim_socket
+from .paths import nvim_log, nvim_socket
 
 #: A note is a label, not a document. Longer than this and it buries the code
 #: it points at, however the editor folds it.
@@ -97,6 +102,10 @@ class Session:
     #: 'light' or 'dark', taken from the human's terminal. A headless nvim
     #: cannot detect it.
     background: str | None = None
+    #: The environment nvim runs with: the shell that ran `nv new`, so the
+    #: session sees the same PATH and display the human does. Kept for the
+    #: respawn after `:q`.
+    env: dict[str, str] | None = None
     #: What the session shows and what the human has handed back. nvim draws
     #: this; it does not own it.
     notes: list[Note] = field(default_factory=list)
@@ -106,20 +115,34 @@ class Session:
     #: Called when the record changes outside a tool call, so the broker can
     #: save it. Marks and positions can arrive from nvim on their own.
     on_change: Callable[[], None] | None = None
-    process: asyncio.subprocess.Process | None = None
-    rpc: NvimRPC | None = None
+    editor: Editor = field(init=False, repr=False)
     #: Orders every exchange with nvim, including starting it. Two callers
     #: that find the session dead at the same moment would otherwise each
     #: spawn an nvim, and only one of them would be the session's.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+
+    def __post_init__(self) -> None:
+        self.editor = Editor(
+            self.socket,
+            self.root.path,
+            nvim_log(self.sid),
+            clean=self.clean,
+            env=self.env,
+        )
+
+    @property
+    def rpc(self) -> NvimRPC | None:
+        return self.editor.rpc
 
     @classmethod
     def create(
         cls,
         sid: str,
         root: str | Path,
+        *,
         clean: bool = False,
         background: str | None = None,
+        env: dict[str, str] | None = None,
         key: str | None = None,
     ) -> Session:
         # The short id is for humans to type; the secret is what authorizes.
@@ -128,6 +151,7 @@ class Session:
             sid=sid,
             clean=clean,
             background=background,
+            env=env,
             key=key,
             root=Root.of(root),
             # Name the socket after the key, not the reusable id. nvim unlinks
@@ -143,6 +167,7 @@ class Session:
             "root": str(self.root.path),
             "clean": self.clean,
             "background": self.background,
+            "env": self.env,
             "notes": [asdict(note) for note in self.notes],
             "marks": self.marks,
             "next_note_id": self.next_note_id,
@@ -156,6 +181,7 @@ class Session:
             state["root"],
             clean=bool(state.get("clean")),
             background=state.get("background"),
+            env=state.get("env"),
             key=state["key"],
         )
         session.notes = [Note(**note) for note in state.get("notes", [])]
@@ -164,83 +190,70 @@ class Session:
         session.title = state.get("title", "agent")
         return session
 
-    async def _start(self) -> None:
-        self.socket.unlink(missing_ok=True)
-        self.process = await asyncio.create_subprocess_exec(
-            "nvim",
-            *(["--clean"] if self.clean else []),
-            "--headless",
-            "--listen",
-            str(self.socket),
-            cwd=str(self.root.path),
-        )
-        await self._await_socket()
-        self.rpc = await NvimRPC.connect(self.socket)
+    async def _setup(self, notes: list[dict[str, Any]] | None) -> None:
+        """Install the session's Lua in the connected nvim.
+
+        With notes, nvim starts drawing them; without, it keeps whatever it
+        already draws, which is what an adopted nvim should do.
+        """
+        assert self.rpc is not None
         self.rpc.on_notification = self._on_notification
         self.rpc.on_request = self._on_request
         channel, _ = await self.rpc.request("nvim_get_api_info")
+        options = {
+            "chan": channel,
+            "background": self.background,
+            "text_limit": MARK_TEXT_LIMIT,
+        }
+        # No notes means no argument at all: a nil positional would reach Lua
+        # as vim.NIL, which is not nil.
         await self.rpc.lua(
-            SESSION_INIT,
-            {
-                "chan": channel,
-                "background": self.background,
-                "text_limit": MARK_TEXT_LIMIT,
-            },
-            self._notes_for_lua(),
+            SESSION_INIT, options, *([notes] if notes is not None else [])
         )
-        # After a restart this is what puts the review back in front of the
-        # human. Nobody is attached yet, so there is no view to preserve.
-        if self.notes:
-            result = await self.rpc.lua(
-                SHOW, self._notes_for_lua(), {"title": self.title, "focus": True}
-            )
-            self._absorb(result["sync"])
 
     def _notes_for_lua(self) -> list[dict[str, Any]]:
         return [asdict(note) for note in self.notes]
 
-    async def _await_socket(self, timeout: float = 10.0) -> None:
-        deadline = asyncio.get_running_loop().time() + timeout
-        while asyncio.get_running_loop().time() < deadline:
-            if self.socket.exists():
-                return
-            # A configuration error kills nvim in milliseconds. Without this the
-            # failure is reported as a timeout, naming the wrong cause.
-            if self.process is not None and self.process.returncode is not None:
-                raise RuntimeError(f"nvim exited with status {self.process.returncode}")
-            await asyncio.sleep(0.02)
-        raise RuntimeError(f"nvim did not listen on {self.socket} within {timeout}s")
-
     @property
     def alive(self) -> bool:
-        # The read loop notices the socket close as soon as nvim exits, while
-        # the process return code lands a moment later.
-        return (
-            self.process is not None
-            and self.process.returncode is None
-            and self.rpc is not None
-            and not self.rpc.closed
-        )
+        return self.editor.alive
 
-    async def ensure(self) -> None:
+    async def ensure(self, spawn: bool = True) -> None:
         """Bring the session's nvim back if it is gone.
 
         `:q` in an attached UI kills the server outright, and the human has no
-        reason to know that ends the review.
+        reason to know that ends the review. Without `spawn`, only an nvim
+        that is already running is taken.
         """
         async with self._lock:
-            await self._ensure()
+            await self._ensure(spawn)
 
-    async def _ensure(self) -> None:
-        if self.alive:
-            return
-        if self.rpc is not None:
-            await self.rpc.close()
-            self.rpc = None
-        if self.process is not None and self.process.returncode is None:
-            self.process.kill()
-            await self.process.wait()
-        await self._start()
+    async def _ensure(self, spawn: bool = True) -> None:
+        outcome = await self.editor.ensure(spawn)
+        if outcome == "started":
+            await self._setup(self._notes_for_lua())
+            # After a restart this is what puts the review back in front of
+            # the human. Nobody is attached yet, so there is no view to preserve.
+            if self.notes:
+                await self._draw(focus=True)
+        elif outcome == "adopted":
+            # nvim has been on its own: it may hold moved notes and questions
+            # asked while no broker was listening.
+            await self._setup(None)
+            assert self.rpc is not None
+            self._absorb(await self.rpc.lua(SYNC))
+            shown = await self.rpc.lua(
+                "return vim.tbl_map(function(n) return n.id end, NvimMcp.notes)"
+            )
+            if list(shown or []) != [note.id for note in self.notes]:
+                await self._draw(focus=False)
+
+    async def _draw(self, focus: bool) -> None:
+        assert self.rpc is not None
+        result = await self.rpc.lua(
+            SHOW, self._notes_for_lua(), {"title": self.title, "focus": focus}
+        )
+        self._absorb(result["sync"])
 
     async def _attempt(self, action: Callable[[], Awaitable[Any]]) -> Any:
         """Run one exchange with nvim, starting it again if it has gone.
@@ -350,22 +363,24 @@ class Session:
             except NvimGone:
                 return False
 
-    async def close(self) -> None:
+    async def _hand_over(self) -> None:
+        """Take a final sync before dropping the connection.
+
+        Once the connection closes, nvim's own hand-over on exit has nobody
+        to give it to.
+        """
+        if self.rpc is not None:
+            with contextlib.suppress(Exception):
+                self._absorb(await self.rpc.lua(SYNC))
+
+    async def detach(self) -> None:
+        """Leave nvim running for the next broker."""
         async with self._lock:
-            if self.rpc is not None:
-                # Take the final sync ourselves: once qall! goes out nvim's own
-                # hand-over finds this connection already closing.
-                with contextlib.suppress(Exception):
-                    self._absorb(await self.rpc.lua(SYNC))
-                with contextlib.suppress(Exception):
-                    await self.rpc.notify("nvim_command", "qall!")
-                await self.rpc.close()
-                self.rpc = None
-            if self.process is not None:
-                with contextlib.suppress(TimeoutError):
-                    await asyncio.wait_for(self.process.wait(), 3)
-                if self.process.returncode is None:
-                    self.process.kill()
-                    await self.process.wait()
-                self.process = None
-            self.socket.unlink(missing_ok=True)
+            await self._hand_over()
+            await self.editor.detach()
+
+    async def close(self) -> None:
+        """Stop nvim. The human's attached terminal goes with it."""
+        async with self._lock:
+            await self._hand_over()
+            await self.editor.stop()

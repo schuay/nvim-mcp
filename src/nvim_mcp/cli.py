@@ -4,8 +4,9 @@
 """`nv`: create sessions, attach a terminal to one, and inspect them.
 
 Sessions are created here rather than by a client, because the root a session is
-clamped to has to come from the human. The broker spawns nvim, so the session
-inherits the broker's environment, not this shell's.
+clamped to has to come from the human. This shell's environment goes along, so
+the session's nvim finds the same language servers and display the human's
+everyday one does; the broker that spawns it was started from some other shell.
 """
 
 from __future__ import annotations
@@ -45,12 +46,14 @@ def _ensure_broker(timeout: float = 10.0) -> None:
         return
     # start_new_session detaches the broker from this terminal, so it survives
     # the shell that started it.
-    subprocess.Popen(
-        [sys.executable, "-m", "nvim_mcp.broker"],
-        start_new_session=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    with paths.broker_log().open("ab") as log:
+        subprocess.Popen(
+            [sys.executable, "-m", "nvim_mcp.broker"],
+            start_new_session=True,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=log,
+        )
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         try:
@@ -60,13 +63,6 @@ def _ensure_broker(timeout: float = 10.0) -> None:
         else:
             return
     raise SystemExit("nvim-mcp: broker did not start")
-
-
-def _session(sid: str) -> dict[str, Any]:
-    for session in _ask({"cmd": "ls"})["sessions"]:
-        if session["id"] == sid:
-            return session
-    raise SystemExit(f"nvim-mcp: no session {sid}")
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -79,6 +75,7 @@ def cmd_new(args: argparse.Namespace) -> int:
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
             "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
+            "env": dict(os.environ),
         }
     )
     if not reply["ok"]:
@@ -106,13 +103,18 @@ def cmd_ls(_args: argparse.Namespace) -> int:
 
 
 def cmd_attach(args: argparse.Namespace) -> NoReturn:
-    session = _session(args.id)
+    _ensure_broker()
+    # The broker starts the session's nvim if it has to; a socket path alone
+    # would be an error when nothing listens on it.
+    reply = _ask({"cmd": "attach", "id": args.id}, timeout=30.0)
+    if not reply["ok"]:
+        raise SystemExit(f"nvim-mcp: {reply['error']}")
     nvim = shutil.which("nvim")
     if nvim is None:
         raise SystemExit("nvim-mcp: nvim is not on PATH")
     # A resolved path, a fixed argv, and a socket path the broker chose.
     # Replacing this process is what makes the terminal the session's UI.
-    os.execv(nvim, [nvim, "--remote-ui", "--server", session["socket"]])  # noqa: S606
+    os.execv(nvim, [nvim, "--remote-ui", "--server", reply["socket"]])  # noqa: S606
 
 
 def cmd_kill(args: argparse.Namespace) -> int:
