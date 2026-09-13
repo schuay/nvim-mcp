@@ -83,18 +83,30 @@ class Editor:
         """
         if self.alive:
             return "alive"
-        await self._forget()
+        # Drop the connection, not the editor. Losing contact says nothing
+        # about nvim, which may be listening on its socket with edits in it
+        # that nobody has saved; reconnecting is tried before replacing.
+        await self._disconnect()
         if await self._adopt():
             return "adopted"
+        await self._forget()
         if not spawn:
             return "absent"
         await self._spawn()
         return "started"
 
-    async def _forget(self) -> None:
+    async def _disconnect(self) -> None:
         if self.rpc is not None:
             await self.rpc.close()
             self.rpc = None
+
+    async def _forget(self) -> None:
+        """Give up on the nvim behind this session, having failed to reach it.
+
+        Only after a reconnection has been tried: nvim that answers its socket
+        is this session's nvim, however the last connection ended.
+        """
+        await self._disconnect()
         if self.process is not None:
             if self.process.returncode is None:
                 # Its connection is gone, so it is exiting or wedged. Either

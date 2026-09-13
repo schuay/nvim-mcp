@@ -171,9 +171,18 @@ end
 -- cut, so a long note would run off the right edge. Clip it to what the entry
 -- leaves after nvim's own 'file|line col n note| ' prefix; the band above the
 -- code carries the whole text.
+-- Cut to a byte length without splitting a character. A half character is
+-- not UTF-8, and msgpack strings are: one used to break the broker's decoder,
+-- and the broker used to answer a broken connection by replacing the editor.
+local function cut(text, bytes)
+  if bytes < 1 then return '' end
+  return text:sub(1, bytes + vim.str_utf_start(text, bytes + 1))
+end
+
+
 local function clip(text, room)
   if #text <= room then return text end
-  return (text:sub(1, math.max(1, room - 3)):gsub('%s+$', '')) .. '...'
+  return (cut(text, math.max(1, room - 3)):gsub('%s+$', '')) .. '...'
 end
 
 
@@ -512,7 +521,7 @@ vim.api.nvim_create_user_command('Ask', function(o)
   -- reads it, and an agent in a sandbox may not be able to read it at all.
   local text = table.concat(vim.api.nvim_buf_get_lines(buf, o.line1 - 1, o.line2, false), '\n')
   local truncated = #text > M.text_limit
-  if truncated then text = text:sub(1, M.text_limit) end
+  if truncated then text = cut(text, M.text_limit) end
   local mark = {
     file = vim.api.nvim_buf_get_name(buf),
     line1 = o.line1,

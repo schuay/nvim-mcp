@@ -120,7 +120,10 @@ class NvimRPC:
             await self._writer.wait_closed()
 
     async def _read_loop(self) -> None:
-        unpacker = msgpack.Unpacker(raw=False)
+        # A buffer can hold bytes that are not UTF-8, from a latin-1 file or
+        # a half-finished edit, and they reach here in a mark or a range. They
+        # are the human's content to lose, not the connection's.
+        unpacker = msgpack.Unpacker(raw=False, unicode_errors="replace")
         try:
             while chunk := await self._reader.read(65536):
                 unpacker.feed(chunk)

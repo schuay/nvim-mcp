@@ -30,6 +30,13 @@ log = logging.getLogger(__name__)
 #: Exit once nothing has needed the broker for this long.
 IDLE_EXIT_SECONDS = 15 * 60
 
+#: How long a line a client may send. One tool call is one line, and the
+#: contract accepts 50 locations carrying 2000 characters of note each, which
+#: is several times asyncio's 64 KiB default: a call the tools would have
+#: accepted arrived as a closed connection instead. `nv` sends the whole
+#: environment of the shell it ran in, which is smaller but not by much.
+LINE_LIMIT = 4 * 1024 * 1024
+
 
 class Broker:
     def __init__(self) -> None:
@@ -372,10 +379,14 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         socket_path.unlink(missing_ok=True)
 
     admin = await asyncio.start_unix_server(
-        lambda r, w: _admin_client(broker, r, w), path=str(paths.admin_socket())
+        lambda r, w: _admin_client(broker, r, w),
+        path=str(paths.admin_socket()),
+        limit=LINE_LIMIT,
     )
     agent = await asyncio.start_unix_server(
-        lambda r, w: _agent_client(broker, r, w), path=str(paths.agent_socket())
+        lambda r, w: _agent_client(broker, r, w),
+        path=str(paths.agent_socket()),
+        limit=LINE_LIMIT,
     )
     paths.admin_socket().chmod(0o600)
     paths.agent_socket().chmod(0o600)

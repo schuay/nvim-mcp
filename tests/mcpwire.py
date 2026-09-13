@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from nvim_mcp import splice
+from nvim_mcp import broker, splice
 
 
 class Wire:
@@ -28,7 +28,12 @@ class Wire:
 
     @classmethod
     async def connect(cls, socket: Path, key: str | None = None) -> Wire:
-        reader, writer = await asyncio.open_unix_connection(str(socket))
+        # A result can carry a mark of buffer text or fifty long notes, which
+        # is past asyncio's default line limit. The splice a real client runs
+        # reads in chunks and has no such limit.
+        reader, writer = await asyncio.open_unix_connection(
+            str(socket), limit=broker.LINE_LIMIT
+        )
         wire = cls(reader, writer)
         if key is not None:
             wire.hello = await wire.present(key)
