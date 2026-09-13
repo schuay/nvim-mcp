@@ -122,11 +122,50 @@ async def test_ask_hands_a_range_to_the_agent(running_broker: Path, repo: Path) 
     assert Path(mark["file"]).name == "main.c"
     # The note the question was asked on, so a reply threads onto it.
     assert mark["note_id"] == 1
-    # Reading the log twice does not hand the same mark over again.
-    assert await call(wire, "read", session=session["key"], what="marks") == {
-        **payload,
-        "marks": [],
-    }
+    # Reading is not answering: the question stays pending until acknowledged,
+    # so a client that reads and then dies does not lose it.
+    again = await call(wire, "read", session=session["key"], what="marks")
+    assert [m["id"] for m in again["marks"]] == [mark["id"]]
+    assert again["marks_pending"] == 1
+
+    answered = await call(
+        wire, "read", session=session["key"], what="marks", ack=[mark["id"]]
+    )
+    assert answered["marks"] == []
+    assert answered["marks_pending"] == 0
+    await wire.close()
+
+
+async def test_an_unanswered_question_survives_a_reconnect(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket())
+    await review(wire, session["key"])
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    await nvim.request("nvim_command", "edit src/main.c")
+    await nvim.request("nvim_command", "2Ask look at this")
+    await nvim.request("nvim_command", "3Ask and this")
+    await nvim.close()
+
+    first = await call(wire, "read", session=session["key"], what="marks")
+    await call(
+        wire,
+        "read",
+        session=session["key"],
+        what="marks",
+        ack=[first["marks"][0]["id"]],
+    )
+    await wire.close()
+
+    # Every MCP client that reconnects starts a new session, so delivery cannot
+    # be tracked per connection: the answered question must stay answered and
+    # the other must come back.
+    wire = await Wire.connect(paths.agent_socket())
+    payload = await call(wire, "read", session=session["key"], what="marks")
+    assert [m["note"] for m in payload["marks"]] == ["and this"]
+    assert payload["marks_pending"] == 1
     await wire.close()
 
 

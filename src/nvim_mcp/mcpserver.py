@@ -93,7 +93,8 @@ READ_TOOL = types.Tool(
     description=(
         "Read the human's session. 'marks' collects the ranges they handed over "
         "with :Ask, each with their question; call it when they refer to "
-        "something they marked. 'cursor' is where they are now and what they "
+        "something they marked, and pass the ids back in 'ack' once you have "
+        "answered them, or they stay pending and come back. 'cursor' is where they are now and what they "
         "last selected. 'range' reads an open buffer, including edits they have "
         "not saved. 'tabs' lists what is open. Everything but 'marks' is limited "
         "to the session root."
@@ -105,6 +106,14 @@ READ_TOOL = types.Tool(
             "file": {"type": "string", "description": "With what='range'"},
             "start_line": {"type": "integer", "description": "1-based, inclusive"},
             "end_line": {"type": "integer", "description": "1-based, inclusive"},
+            "ack": {
+                "type": "array",
+                "items": {"type": "integer"},
+                "description": (
+                    "Mark ids you have now dealt with. Until you acknowledge a "
+                    "mark it stays pending and is handed to you again."
+                ),
+            },
             "session": SESSION_ARG,
         },
         "required": ["what", "session"],
@@ -115,7 +124,19 @@ READ_TOOL = types.Tool(
 SessionLookup = Callable[[str], Session | None]
 
 
-def _envelope(session: Session, seen: int, **extra: Any) -> dict[str, Any]:
+def pending(session: Session) -> list[dict[str, Any]]:
+    """Return the questions nobody has answered yet.
+
+    A mark stays pending until an agent acknowledges it, not until some agent
+    reads it. Reading is not answering: a client that reads and then
+    disconnects, or a second agent looking on, must not be what makes the
+    human's question disappear. A reconnecting client is the common case, since
+    each one starts a new MCP session.
+    """
+    return [mark for mark in session.marks if not mark.get("acked")]
+
+
+def _envelope(session: Session, **extra: Any) -> dict[str, Any]:
     """Add the state every result carries.
 
     An agent learns about a waiting question from any call it happens to make,
@@ -124,12 +145,12 @@ def _envelope(session: Session, seen: int, **extra: Any) -> dict[str, Any]:
     return {
         "session": session.sid,
         "attach_cmd": f"nv {session.sid}",
-        "marks_pending": max(0, len(session.marks) - seen),
+        "marks_pending": len(pending(session)),
         **extra,
     }
 
 
-async def _show(session: Session, params: dict[str, Any], seen: int) -> dict[str, Any]:
+async def _show(session: Session, params: dict[str, Any]) -> dict[str, Any]:
     locations, refused = [], []
     requested = params["locations"]
     for raw in requested[:LOCATION_LIMIT]:
@@ -169,13 +190,15 @@ async def _show(session: Session, params: dict[str, Any], seen: int) -> dict[str
         for path in result.get("moved", []):
             refused.append({"file": path, "reason": "path changed while opening"})
 
-    return _envelope(session, seen, attached=attached, opened=opened, refused=refused)
+    return _envelope(session, attached=attached, opened=opened, refused=refused)
 
 
-async def _read(
-    session: Session, params: dict[str, Any], seen: int
-) -> tuple[dict[str, Any], int]:
+async def _read(session: Session, params: dict[str, Any]) -> dict[str, Any]:
     what = params["what"]
+    acknowledged = set(params.get("ack") or [])
+    for mark in session.marks:
+        if mark.get("id") in acknowledged:
+            mark["acked"] = True
     options: dict[str, Any] = {}
     if what == "range":
         if not params.get("file"):
@@ -190,13 +213,7 @@ async def _read(
     attached = await session.attached()
 
     if what == "marks":
-        # A log with a per-client position, not a queue: with two agents on one
-        # session, the first to read must not consume the other's questions.
-        marks = session.marks[seen:]
-        return (
-            _envelope(session, len(session.marks), attached=attached, marks=marks),
-            len(session.marks),
-        )
+        return _envelope(session, attached=attached, marks=pending(session))
 
     payload: dict[str, Any] = {}
     if what == "cursor":
@@ -214,7 +231,7 @@ async def _read(
             for state in result.get("buffers") or []
             if _within(session, state.get("file"))
         ]
-    return _envelope(session, seen, attached=attached, **payload), seen
+    return _envelope(session, attached=attached, **payload)
 
 
 def _within(session: Session, file: str | None) -> bool:
@@ -238,9 +255,6 @@ def _inside(session: Session, state: dict[str, Any]) -> dict[str, Any]:
 
 
 def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Server:
-    #: How many of each session's marks this client has already been given.
-    seen: dict[str, int] = {}
-
     async def on_list_tools(_ctx: Any, _params: Any) -> types.ListToolsResult:
         return types.ListToolsResult(tools=[SHOW_TOOL, READ_TOOL])
 
@@ -248,17 +262,16 @@ def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Serv
         _ctx: Any, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         arguments = params.arguments or {}
-        key = str(arguments.get("session", ""))
-        session = lookup(key)
+        session = lookup(str(arguments.get("session", "")))
         if session is None:
             return _error(
                 "no such session. Ask the human to run `nv new <root>` and paste the key it prints."
             )
         try:
             if params.name == "show":
-                payload = await _show(session, arguments, seen.get(key, 0))
+                payload = await _show(session, arguments)
             elif params.name == "read":
-                payload, seen[key] = await _read(session, arguments, seen.get(key, 0))
+                payload = await _read(session, arguments)
             else:
                 return _error(f"unknown tool: {params.name}")
         except Refused as e:
