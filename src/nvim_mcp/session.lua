@@ -534,3 +534,27 @@ vim.api.nvim_create_user_command('Ask', function(o)
   vim.notify(delivered and 'nvim-mcp: question handed to the agent'
              or 'nvim-mcp: broker away, question kept for it')
 end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' })
+
+-- The other direction, for the chat rather than the session: `:Ref` puts a
+-- reference to the current line or range where it can be pasted, spelled the
+-- way an agent names one -- relative to the session root, which is this
+-- nvim's cwd, and 1-based and inclusive like `show`.
+vim.api.nvim_create_user_command('Ref', function(o)
+  local name = vim.api.nvim_buf_get_name(0)
+  if name == '' then
+    vim.notify('nvim-mcp: buffer has no file')
+    return
+  end
+  local path = vim.fn.fnamemodify(name, ':.')
+  local ref = o.line1 == o.line2 and string.format('%s:%d', path, o.line1)
+    or string.format('%s:%d-%d', path, o.line1, o.line2)
+  -- The clipboard register rather than a clipboard tool by name: nvim already
+  -- picks the one that fits the session it was started in, and a session's
+  -- nvim inherits the environment of the shell that asked for it.
+  if vim.fn.has('clipboard') == 0 then
+    vim.notify('nvim-mcp: no clipboard provider; ' .. ref)
+    return
+  end
+  vim.fn.setreg('+', ref)
+  vim.notify('nvim-mcp: copied ' .. ref)
+end, { range = true, desc = 'Copy a reference to the current line or range' })

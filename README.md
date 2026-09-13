@@ -30,6 +30,10 @@ On your side:
 - `:3,5Ask why is this here?` hands lines 3 to 5 and your question to the
   agent, tagged with the note it sits on. The agent collects questions with
   `read`, and a question stays pending until the agent has answered it.
+- `:Ref` copies a reference to the current line, `:7,9Ref` to a range, in the
+  form the agent reads them back: `src/main.c:7-9`, relative to the session
+  root. It goes to the clipboard register, so nvim picks the tool your session
+  uses.
 - `:AgentPop` drops the top frame of notes; `:AgentDrop B` drops a named one.
 - `:q` is safe. The broker holds the record of what is shown and starts nvim
   again, with the notes on the lines your edits moved them to.

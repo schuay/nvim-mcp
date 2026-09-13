@@ -202,3 +202,34 @@ async def test_the_record_holds_nothing_of_nvims(
     assert Session.restore(session.state()).notes == [
         Note(id="A1", file=str(session.notes[0].file), line=4, end_line=6, text="note")
     ]
+
+
+async def test_ref_copies_a_reference_the_agent_can_take_back(
+    session: Session, human: NvimRPC, repo: Path
+) -> None:
+    await session.show([Location(repo / "src" / "main.c", line=3)], "review", True)
+    # A fake provider: the test host has a real clipboard tool, and a test has
+    # no business putting anything on the human's clipboard.
+    await human.lua("""
+        _G.copied = nil
+        vim.g.clipboard = {
+          name = 'test',
+          copy = { ['+'] = function(lines) _G.copied = lines end, ['*'] = function() end },
+          paste = {
+            ['+'] = function() return { '' } end,
+            ['*'] = function() return { '' } end,
+          },
+        }
+    """)
+
+    copied = await human.lua("""
+        vim.cmd('edit src/main.c')
+        vim.cmd('4Ref')
+        local one = _G.copied
+        vim.cmd('7,9Ref')
+        return { one = one, range = _G.copied }
+    """)
+    # Root-relative and inclusive, which is how show takes file, line and
+    # end_line back.
+    assert copied["one"] == ["src/main.c:4"]
+    assert copied["range"] == ["src/main.c:7-9"]
