@@ -34,6 +34,12 @@ from typing import Any
 RECONNECT_WINDOW = float(os.environ.get("NVIM_MCP_RECONNECT_WINDOW", "5"))
 CONNECTION_LOST = -32000
 
+#: The field naming the line a client sends before any JSON-RPC to say which
+#: session it was launched for, and the broker's answer to it. Connection
+#: setup, the same layer as the handshake replayed below: no tool is named and
+#: no argument is rewritten, so this side still holds no schema.
+HELLO = "nvim_mcp"
+
 
 def write_all(fd: int, data: bytes) -> None:
     """Write every byte.
@@ -66,8 +72,16 @@ def _message(line: bytes) -> dict[str, Any] | None:
 
 
 class Splice:
-    def __init__(self, socket_path: str, revive: Callable[[], None] | None = None):
+    def __init__(
+        self,
+        socket_path: str,
+        revive: Callable[[], None] | None = None,
+        key: str | None = None,
+    ):
         self.socket_path = socket_path
+        #: The session this client was launched for, presented on every
+        #: connection so a client in a sandbox never has to be told a key.
+        self.key = key
         #: Asked for a broker when nothing answers the socket. On the host this
         #: starts one; a sandbox either has no way to ask (None) or starts one
         #: that cannot claim the read-only agent directory.
@@ -198,6 +212,9 @@ class Splice:
             sock = self._dial(RECONNECT_WINDOW)
         if sock is None:
             return False
+        if self.key is not None and not self._hello(sock):
+            sock.close()
+            return False
         if self.handshake and not self._replay(sock):
             sock.close()
             return False
@@ -222,6 +239,39 @@ class Splice:
                 time.sleep(0.1)
             else:
                 return sock
+
+    def _hello(self, sock: socket.socket) -> bool:
+        """Name the session before the MCP stream starts, and wait to be told.
+
+        A refusal here is worth failing on: the client would otherwise come up
+        with tools that answer every call with "no such session".
+        """
+        try:
+            sock.sendall(json.dumps({HELLO: {"key": self.key}}).encode() + b"\n")
+            sock.settimeout(RECONNECT_WINDOW)
+            lines = Lines()
+            while True:
+                chunk = sock.recv(65536)
+                if not chunk:
+                    return False
+                for line in lines.feed(chunk):
+                    message = _message(line)
+                    if message is None or HELLO not in message:
+                        return False
+                    answer = message[HELLO]
+                    if not answer.get("ok"):
+                        print(
+                            f"nvim-mcp: {answer.get('error', 'key refused')}",
+                            file=sys.stderr,
+                        )
+                        return False
+                    # Nothing else can have arrived: the broker sends nothing
+                    # until it is spoken to.
+                    self.from_sock = lines
+                    sock.settimeout(None)
+                    return True
+        except OSError:
+            return False
 
     def _replay(self, sock: socket.socket) -> bool:
         """Repeat the client's handshake and swallow the broker's answer.
@@ -248,15 +298,25 @@ class Splice:
             return False
 
 
-def splice(socket_path: str, revive: Callable[[], None] | None = None) -> int:
-    return Splice(socket_path, revive).run()
+def splice(
+    socket_path: str,
+    revive: Callable[[], None] | None = None,
+    key: str | None = None,
+) -> int:
+    return Splice(socket_path, revive, key).run()
 
 
 def main() -> int:
-    if len(sys.argv) != 2:
-        print("usage: splice.py <socket>", file=sys.stderr)
+    # The key is a file rather than an argument: an MCP client config is
+    # readable inside the box, and a secret in it would be too.
+    if not 2 <= len(sys.argv) <= 3:
+        print("usage: splice.py <socket> [key-file]", file=sys.stderr)
         return 2
-    return splice(sys.argv[1])
+    key = None
+    if len(sys.argv) == 3:
+        with open(sys.argv[2]) as handle:
+            key = handle.read().strip()
+    return splice(sys.argv[1], key=key)
 
 
 if __name__ == "__main__":

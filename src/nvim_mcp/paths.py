@@ -50,6 +50,38 @@ def agent_dir() -> Path:
     return _mkdir(Path(share) / "nvim-mcp")
 
 
+def box_dir() -> Path:
+    """Return the directory holding one entry per sandbox launch.
+
+    A launcher leaves a session key in a private subdirectory and binds that
+    subdirectory, and only it, into the box it is starting. The parent is
+    deliberately somewhere no bind spec mounts, so a box sees its own entry and
+    cannot enumerate anyone else's. Not created here: inside a box this path is
+    read-only.
+    """
+    base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
+    return Path(base) / "nvim-mcp-box"
+
+
+def box_key() -> str | None:
+    """Return the session key a launcher left for this client, if any.
+
+    Only a sandboxed client takes one. The test is whether the agent directory
+    is writable, which is the same property that stops a broker from starting
+    inside a box: on the host the directory holds an entry per live box, none
+    of which belongs to the client asking.
+    """
+    if os.access(agent_dir(), os.W_OK):
+        return None
+    keys = sorted(box_dir().glob("*/key"))
+    if len(keys) != 1:
+        return None
+    try:
+        return keys[0].read_text().strip() or None
+    except OSError:
+        return None
+
+
 def state_dir() -> Path:
     """Return the directory holding session state that outlives the broker."""
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"

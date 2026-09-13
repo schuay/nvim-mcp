@@ -222,7 +222,19 @@ def _outside(state: dict[str, Any]) -> OutsideRoot:
     return OutsideRoot(file=state.get("file"), refused="outside the session root")
 
 
-def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Server:
+def build(
+    lookup: SessionLookup,
+    save: Callable[[], None] | None = None,
+    default_key: str | None = None,
+) -> Server:
+    """Serve the two tools over one connection.
+
+    `default_key` is the session this connection was opened for, if it named
+    one. It stands in for an omitted `session` argument, so a client launched
+    for a single session never handles a key and a client serving several
+    still picks per call.
+    """
+
     async def on_list_tools(_ctx: Any, _params: Any) -> types.ListToolsResult:
         return types.ListToolsResult(tools=[SHOW_TOOL, READ_TOOL])
 
@@ -241,10 +253,14 @@ def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Serv
                 return _error(f"unknown tool: {params.name}")
         except ValidationError as e:
             return _error(models.invalid(e.errors()))
-        session = lookup(request.session)
+        key = request.session or default_key
+        session = lookup(key) if key else None
         if session is None:
             return _error(
-                "no such session. Ask the human to run `nv new <root>` and paste the key it prints."
+                "no such session. Ask the human to run `nv new <root>` and "
+                "paste the key it prints."
+                if key
+                else "no session: pass `session`, or start this client with `nv box`."
             )
         try:
             payload: Envelope

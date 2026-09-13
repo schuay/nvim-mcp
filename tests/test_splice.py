@@ -283,10 +283,15 @@ def test_the_host_splice_revives_the_broker(monkeypatch: pytest.MonkeyPatch) -> 
     monkeypatch.setattr(
         cli.splice,
         "splice",
-        lambda path, revive=None: captured.update(revive=revive) or 0,
+        lambda path, revive=None, key=None: (
+            captured.update(revive=revive, key=key) or 0
+        ),
     )
     cli.cmd_mcp(argparse.Namespace())
     assert captured["revive"] is cli._revive_broker
+    # No launcher left a key on the host, where the agent directory is
+    # writable, so the client keeps naming a session per call.
+    assert captured["key"] is None
 
 
 def test_serving_mcp_starts_no_broker_before_trying_the_socket(
@@ -300,7 +305,7 @@ def test_serving_mcp_starts_no_broker_before_trying_the_socket(
 
     started: list[None] = []
     monkeypatch.setattr(cli, "_ensure_broker", lambda: started.append(None))
-    monkeypatch.setattr(cli.splice, "splice", lambda path, revive=None: 0)
+    monkeypatch.setattr(cli.splice, "splice", lambda path, revive=None, key=None: 0)
 
     cli.cmd_mcp(argparse.Namespace())
 

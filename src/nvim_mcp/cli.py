@@ -15,6 +15,7 @@ import argparse
 import contextlib
 import json
 import os
+import secrets
 import shutil
 import socket
 import subprocess
@@ -87,6 +88,75 @@ def cmd_new(args: argparse.Namespace) -> int:
     return 0
 
 
+def _session_for(args: argparse.Namespace, command: str) -> dict[str, Any]:
+    _ensure_broker()
+    reply = _ask(
+        {
+            "cmd": command,
+            "root": str(Path(args.root).expanduser().resolve()),
+            "clean": args.clean,
+            "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
+            "env": dict(os.environ),
+        },
+        timeout=30.0,
+    )
+    if not reply["ok"]:
+        raise SystemExit(f"nvim-mcp: {reply['error']}")
+    return reply
+
+
+def cmd_ensure(args: argparse.Namespace) -> int:
+    print(json.dumps(_session_for(args, "ensure")))
+    return 0
+
+
+#: Box directories left by a launcher that died before it could clean up. The
+#: key inside one names a session that is probably gone, and nothing reads a
+#: stale directory, so age is the only signal worth acting on.
+BOX_MAX_AGE = 24 * 60 * 60
+
+
+def cmd_box(args: argparse.Namespace) -> int:
+    """Prepare one sandbox launch and print the bind spec that carries it.
+
+    The session comes first, because the root is the human's to choose and a
+    launcher knows it: the directory the human started the agent in. The key
+    goes in a directory of its own, which the caller binds read-only into that
+    box and no other, so the agent inside never handles a key and cannot name
+    a session it was not given.
+    """
+    reply = _session_for(args, "ensure")
+    _sweep_boxes()
+    token = secrets.token_hex(8)
+    directory = paths.box_dir() / token
+    directory.mkdir(mode=0o700, parents=True)
+    key = directory / "key"
+    key.touch(mode=0o600)
+    key.write_text(reply["key"])
+    spec = paths.box_dir() / f"{token}.toml"
+    # Only the key directory. Everything else a box needs is in the specs the
+    # caller already passes, and an entry here would apply to one launch.
+    spec.write_text(f'ro = [\n    "{directory}",\n]\n')
+    # stdout is the one thing a launcher consumes; the rest is for the human.
+    print(spec)
+    state = "new session" if reply["created"] else "session"
+    print(
+        f"nvim-mcp: {state} {reply['id']}  root {reply['root']}\n"
+        f"nvim-mcp: attach with:  nv {reply['id']}",
+        file=sys.stderr,
+    )
+    return 0
+
+
+def _sweep_boxes() -> None:
+    now = time.time()
+    for path in paths.box_dir().glob("*"):
+        with contextlib.suppress(OSError):
+            if now - path.stat().st_mtime < BOX_MAX_AGE:
+                continue
+            shutil.rmtree(path) if path.is_dir() else path.unlink()
+
+
 def cmd_ls(_args: argparse.Namespace) -> int:
     try:
         sessions = _ask({"cmd": "ls"})["sessions"]
@@ -133,7 +203,9 @@ def cmd_mcp(_args: argparse.Namespace) -> int:
     broker started here cannot claim the socket, so the one already serving it
     on the host stays the only one.
     """
-    return splice.splice(str(paths.agent_socket()), revive=_revive_broker)
+    return splice.splice(
+        str(paths.agent_socket()), revive=_revive_broker, key=paths.box_key()
+    )
 
 
 def _revive_broker() -> None:
@@ -181,6 +253,19 @@ def main(argv: list[str] | None = None) -> int:
         help="the terminal you will attach from has a dark background",
     )
     new.set_defaults(func=cmd_new, background=None)
+
+    for name, func, help_text in (
+        (
+            "ensure",
+            cmd_ensure,
+            "print the session for a root as JSON, making one if needed",
+        ),
+        ("box", cmd_box, "prepare a sandbox launch and print the bind spec"),
+    ):
+        rooted = sub.add_parser(name, help=help_text)
+        rooted.add_argument("root", nargs="?", default=".")
+        rooted.add_argument("--clean", action="store_true", help=argparse.SUPPRESS)
+        rooted.set_defaults(func=func, background=None)
 
     sub.add_parser("ls", help="list sessions").set_defaults(func=cmd_ls)
 

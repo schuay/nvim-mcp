@@ -35,7 +35,13 @@ class Result(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
 
-SESSION_FIELD = Field(description="Session key, as printed by `nv new`")
+SESSION_FIELD = Field(
+    default=None,
+    description=(
+        "Session key, as printed by `nv new`. Omit it when this client was "
+        "launched for one session and already holds its key."
+    ),
+)
 
 
 class LocationSpec(Request):
@@ -78,7 +84,7 @@ class ShowRequest(Request):
     focus: bool = Field(
         default=True, description="Jump the human's view to the first location"
     )
-    session: str = SESSION_FIELD
+    session: str | None = SESSION_FIELD
 
     @model_validator(mode="after")
     def _locations_unless_pop(self) -> ShowRequest:
@@ -99,7 +105,7 @@ class ReadRequest(Request):
             "stays pending and is handed to you again."
         ),
     )
-    session: str = SESSION_FIELD
+    session: str | None = SESSION_FIELD
 
 
 class Envelope(Result):

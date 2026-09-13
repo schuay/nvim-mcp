@@ -14,6 +14,8 @@ import json
 from pathlib import Path
 from typing import Any
 
+from nvim_mcp import splice
+
 
 class Wire:
     def __init__(
@@ -22,11 +24,14 @@ class Wire:
         self.reader = reader
         self.writer = writer
         self.next_id = 0
+        self.hello: dict[str, Any] | None = None
 
     @classmethod
-    async def connect(cls, socket: Path) -> Wire:
+    async def connect(cls, socket: Path, key: str | None = None) -> Wire:
         reader, writer = await asyncio.open_unix_connection(str(socket))
         wire = cls(reader, writer)
+        if key is not None:
+            wire.hello = await wire.present(key)
         await wire.request(
             "initialize",
             {
@@ -37,6 +42,14 @@ class Wire:
         )
         await wire.notify("notifications/initialized")
         return wire
+
+    async def present(self, key: str) -> dict[str, Any]:
+        """Name a session before the MCP stream starts, as the splice does."""
+        body = {splice.HELLO: {"key": key}}
+        self.writer.write(json.dumps(body).encode() + b"\n")
+        await self.writer.drain()
+        line = await asyncio.wait_for(self.reader.readline(), 30)
+        return json.loads(line)[splice.HELLO]
 
     async def request(
         self, method: str, params: dict[str, Any] | None = None

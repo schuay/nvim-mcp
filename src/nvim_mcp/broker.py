@@ -88,15 +88,43 @@ class Broker:
         env: dict[str, str] | None = None,
     ) -> Session:
         async with self._lock:
-            sid = self._next_id()
-            session = Session.create(
-                sid, root, clean=clean, background=background, env=env
-            )
-            session.on_change = self.save
-            await session.ensure()
-            self.sessions[sid] = session
-            self.save()
-            return session
+            return await self._create(root, clean, background, env)
+
+    async def ensure_session(
+        self,
+        root: str,
+        clean: bool = False,
+        background: str | None = None,
+        env: dict[str, str] | None = None,
+    ) -> tuple[Session, bool]:
+        """Return the session already rooted here, or make one.
+
+        A launcher runs this every time it starts an agent, so a second one in
+        the same tree joins the review already on the human's screen instead of
+        opening an editor nobody is looking at. The lookup and the create share
+        one lock: two launchers racing in the same tree must not end up with a
+        session each.
+        """
+        async with self._lock:
+            for session in self.sessions.values():
+                if str(session.root.path) == root:
+                    return session, False
+            return await self._create(root, clean, background, env), True
+
+    async def _create(
+        self,
+        root: str,
+        clean: bool,
+        background: str | None,
+        env: dict[str, str] | None,
+    ) -> Session:
+        sid = self._next_id()
+        session = Session.create(sid, root, clean=clean, background=background, env=env)
+        session.on_change = self.save
+        await session.ensure()
+        self.sessions[sid] = session
+        self.save()
+        return session
 
     def _next_id(self) -> str:
         used = {int(sid) for sid in self.sessions}
@@ -185,6 +213,22 @@ async def _new(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
+    session, created = await broker.ensure_session(
+        request["root"],
+        bool(request.get("clean")),
+        request.get("background"),
+        request.get("env"),
+    )
+    return {
+        "id": session.sid,
+        "key": session.key,
+        "root": str(session.root.path),
+        "socket": str(session.socket),
+        "created": created,
+    }
+
+
 async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
     listing = []
     for session in broker.sessions.values():
@@ -216,10 +260,55 @@ async def _kill(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
 ADMIN_COMMANDS = {
     "ping": _ping,
     "new": _new,
+    "ensure": _ensure,
     "ls": _ls,
     "attach": _attach,
     "kill": _kill,
 }
+
+
+class _Pushback:
+    """A reader handing back the line already taken off the stream.
+
+    Only `readline` is used by the MCP framing, so this is the whole surface.
+    """
+
+    def __init__(self, reader: asyncio.StreamReader, line: bytes) -> None:
+        self._reader = reader
+        self._line: bytes | None = line
+
+    async def readline(self) -> bytes:
+        line, self._line = self._line, None
+        return line if line is not None else await self._reader.readline()
+
+
+async def _hello(
+    broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+) -> tuple[Any, str | None]:
+    """Take the client's opening line and, if it names a session, answer it.
+
+    A client launched for one session presents its key here instead of putting
+    it in every call, which is what lets a sandboxed one work without ever
+    being told a key. A client that sends JSON-RPC straight away gets its line
+    handed back unread.
+    """
+    line = await reader.readline()
+    try:
+        opening = json.loads(line)
+    except ValueError:
+        opening = None
+    if not isinstance(opening, dict) or splice.HELLO not in opening:
+        return _Pushback(reader, line), None
+    key = str(opening[splice.HELLO].get("key") or "")
+    session = broker.session_by_key(key)
+    answer: dict[str, Any] = {"ok": session is not None}
+    if session is not None:
+        answer["session"] = session.sid
+    else:
+        answer["error"] = "no such session"
+    writer.write(json.dumps({splice.HELLO: answer}).encode() + b"\n")
+    await writer.drain()
+    return reader, key if session is not None else None
 
 
 async def _agent_client(
@@ -228,9 +317,15 @@ async def _agent_client(
     task = asyncio.current_task()
     if task is not None:
         broker.connections.add(task)
-    server = mcpserver.build(broker.session_by_key, broker.save)
     try:
-        await mcpserver.serve(reader, writer, server)
+        stream, key = await _hello(broker, reader, writer)
+    except (OSError, asyncio.IncompleteReadError):
+        broker.connections.discard(task)
+        writer.close()
+        return
+    server = mcpserver.build(broker.session_by_key, broker.save, default_key=key)
+    try:
+        await mcpserver.serve(stream, writer, server)
     except asyncio.CancelledError:
         raise
     except Exception:
