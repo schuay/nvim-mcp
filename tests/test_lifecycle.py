@@ -10,8 +10,10 @@ from pathlib import Path
 import pytest
 from conftest import admin, start_broker, stop_broker
 
+from nvim_mcp import broker as broker_module
 from nvim_mcp import paths
 from nvim_mcp.broker import Broker
+from nvim_mcp.clamp import Refused
 from nvim_mcp.nvimrpc import NvimRPC
 from nvim_mcp.session import Session
 
@@ -103,3 +105,42 @@ async def test_stop_hands_the_sessions_to_the_next_broker(
         assert [s["key"] for s in sessions] == [created["key"]]
     finally:
         await stop_broker(stop, task)
+
+
+def test_a_launcher_cannot_root_a_session_anywhere(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    project = tmp_path / "src" / "project"
+    (project / ".git").mkdir(parents=True)
+
+    broker_module._guard_root(project)
+    broker_module._guard_root(project / "deep" / "inside")
+
+    # The home directory itself, and anything above it.
+    with pytest.raises(Refused, match="too broad"):
+        broker_module._guard_root(tmp_path)
+    with pytest.raises(Refused, match="too broad"):
+        broker_module._guard_root(tmp_path.parent)
+    # A parent holding several projects, which is what `cl` in the wrong
+    # terminal tab would otherwise hand over.
+    with pytest.raises(Refused, match="no repository"):
+        broker_module._guard_root(tmp_path / "src")
+
+
+async def test_ensure_applies_the_guard_and_new_does_not(
+    runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loose = tmp_path / "src"
+    loose.mkdir()
+    broker = Broker()
+    with pytest.raises(Refused, match="no repository"):
+        await broker.ensure_session(str(loose))
+
+    # `nv new` is the human naming a root, and is left alone.
+    session = await broker.new_session(str(loose), clean=True)
+    try:
+        assert session.root.path == loose
+    finally:
+        await session.close()

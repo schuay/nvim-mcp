@@ -38,6 +38,31 @@ IDLE_EXIT_SECONDS = 15 * 60
 LINE_LIMIT = 4 * 1024 * 1024
 
 
+def _guard_root(root: Path) -> None:
+    """Refuse a root a launcher should never have picked on its own.
+
+    `nv new` takes what the human typed. `nv ensure` takes the directory they
+    happened to be standing in, and the session root is a second access list:
+    an agent reads everything under it through the broker, whatever its
+    sandbox mounts.
+
+    It catches a home directory and a tree with no repository at or above it,
+    which is usually a parent holding several. It does not catch a repository
+    that contains repositories -- a checkout with worktrees or vendored
+    subrepos under it -- because nothing here distinguishes that from a
+    project with submodules. For those, the root `nv box` prints is the check.
+    """
+    home = Path.home()
+    if root == home or root in home.parents:
+        raise Refused(f"{root} is too broad a root; name a project directory")
+    for directory in (root, *root.parents):
+        if (directory / ".git").exists():
+            return
+        if directory == home:
+            break
+    raise Refused(f"no repository at or above {root}; `nv new {root}` if you mean it")
+
+
 class Broker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
@@ -120,6 +145,7 @@ class Broker:
             for session in self.sessions.values():
                 if str(session.root.path) == root:
                     return session, False
+            _guard_root(Path(root))
             return await self._create(root, clean, background, env), True
 
     async def _create(

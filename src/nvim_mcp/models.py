@@ -94,7 +94,7 @@ class ShowRequest(Request):
 
 
 class ReadRequest(Request):
-    what: Literal["marks", "cursor", "range", "tabs"]
+    what: Literal["marks", "cursor", "range", "tabs", "notes"]
     file: str | None = Field(default=None, description="With what='range'")
     start_line: int | None = Field(default=None, ge=1, description="1-based, inclusive")
     end_line: int | None = Field(default=None, ge=1, description="1-based, inclusive")
@@ -167,6 +167,22 @@ class Mark(Result):
     truncated: bool = Field(default=False, description="Whether text was cut short")
 
 
+class ShownNote(Result):
+    """A note as the session holds it, with the line nvim last reported."""
+
+    id: str
+    file: str
+    line: int
+    end_line: int | None = None
+    text: str
+
+
+class ShownFrame(Result):
+    letter: str
+    title: str
+    notes: list[ShownNote]
+
+
 class Buffer(Result):
     file: str
     modified: bool
@@ -214,6 +230,9 @@ class ReadResult(Envelope):
         description="Acked ids that name no mark, so a mis-ack is not silence",
     )
     marks: list[Mark] | None = None
+    frames: list[ShownFrame] | None = Field(
+        default=None, description="With what='notes': the stack, bottom first"
+    )
     cursor: Cursor | OutsideRoot | None = None
     range: Range | NotOpen | OutsideRoot | None = None
     buffers: list[Buffer] | None = None

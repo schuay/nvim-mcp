@@ -314,3 +314,72 @@ async def test_a_question_stays_marked_until_it_is_answered(
     assert await signs(nvim) == 1
     await nvim.close()
     await wire.close()
+
+
+async def test_a_buffer_outlives_the_file_it_came_from(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket(), key=session["key"])
+    await review(wire, session["key"])
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    await nvim.lua("""
+        vim.cmd('edit src/main.c')
+        vim.api.nvim_buf_set_lines(0, 0, 1, false, { 'int renamed(void) { return 0; }' })
+    """)
+    await nvim.close()
+    # The agent renames the file it is holding open, which is the likeliest
+    # reason to be asking what the human has on screen.
+    (repo / "src" / "main.c").rename(repo / "src" / "moved.c")
+
+    payload = await call(
+        wire, "read", session=session["key"], what="range", file="src/main.c"
+    )
+    assert payload["range"]["open"] is True
+    assert "renamed" in payload["range"]["text"]
+
+    # A path with neither a file nor a buffer is still refused by name.
+    result = await wire.call(
+        "read", {"session": session["key"], "what": "range", "file": "src/never.c"}
+    )
+    assert result.get("isError") is True
+    assert "no such file" in result["content"][0]["text"]
+    await wire.close()
+
+
+async def test_an_agent_can_read_the_notes_it_did_not_write(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket(), key=session["key"])
+    await review(wire, session["key"])
+    await call(
+        wire,
+        "show",
+        session=session["key"],
+        frame="push",
+        title="aside",
+        locations=[{"file": "README.md", "line": 1, "text": "and this"}],
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    await nvim.lua("""
+        vim.cmd('edit src/main.c')
+        vim.api.nvim_buf_set_lines(0, 0, 0, false, { 'inserted', 'another' })
+    """)
+    await nvim.close()
+
+    # A session outlives the agent that wrote to it: two boxes share one, and
+    # the next one is asked to explain A1 with no idea what A1 says.
+    payload = await call(wire, "read", session=session["key"], what="notes")
+    assert [(f["letter"], f["title"]) for f in payload["frames"]] == [
+        ("A", "review"),
+        ("B", "aside"),
+    ]
+    note = payload["frames"][0]["notes"][0]
+    assert (note["id"], note["text"]) == ("A1", "look here")
+    assert note["file"].endswith("src/main.c")
+    # Where the human's edits left it, not where it was shown.
+    assert (note["line"], note["end_line"]) == (5, 7)
+    await wire.close()

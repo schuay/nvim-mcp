@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
@@ -41,6 +42,7 @@ from .models import (
     ReadRequest,
     ReadResult,
     Refusal,
+    ShownFrame,
     ShowRequest,
     ShowResult,
 )
@@ -84,7 +86,9 @@ READ_TOOL = types.Tool(
         "answered them, or they stay pending and come back. 'cursor' is where "
         "they are now and what they last selected. 'range' reads an open "
         "buffer, including edits they have not saved. 'tabs' lists what is "
-        "open. Everything but 'marks' is limited to the session root."
+        "open. 'notes' gives back the frames and the text of every note on "
+        "screen, which is how an agent that did not write them learns what "
+        "A2 says. Everything but 'marks' is limited to the session root."
     ),
     input_schema=models.schema(ReadRequest),
     output_schema=models.schema(ReadResult),
@@ -182,7 +186,10 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     if request.what == "range":
         if not request.file:
             raise Refused("read(what='range') needs a file")
-        target = session.root.resolve(request.file)
+        # Located, not resolved: a buffer the human is editing outlives the
+        # file, and an agent that just renamed it is the likeliest reason to
+        # be asking. Whether anything is there is settled after nvim answers.
+        target = session.root.locate(request.file)
         options = {
             "file": str(target),
             "start_line": request.start_line,
@@ -195,6 +202,20 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     if unknown:
         envelope["unknown_ack"] = unknown
 
+    if request.what == "notes":
+        # Read from the record rather than from nvim, which holds no text of
+        # its own; the sync that just ran brought the lines up to date.
+        return ReadResult(
+            **envelope,
+            frames=[
+                ShownFrame(
+                    letter=frame.letter,
+                    title=frame.title,
+                    notes=[asdict(note) for note in frame.notes],
+                )
+                for frame in session.frames
+            ],
+        )
     if request.what == "marks":
         marks = [Mark.model_validate(mark) for mark in pending(session)]
         return ReadResult(**envelope, marks=marks)
@@ -207,6 +228,8 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     if request.what == "range":
         state = result.get("range")
         if not state:
+            if not target.is_file():
+                raise Refused("no such file, and no buffer holding it")
             return ReadResult(**envelope, range=NotOpen(open=False, file=str(target)))
         span = (
             Range.model_validate(state) if _within(session, state) else _outside(state)
@@ -230,7 +253,9 @@ def _within(session: Session, state: dict[str, Any]) -> bool:
     if not file:
         return False
     try:
-        return session.root.contains(session.root.resolve(file))
+        # Where it is, not whether it is there: nvim is reporting a buffer it
+        # holds, which may no longer have a file behind it.
+        return session.root.contains(session.root.locate(file))
     except Refused:
         return False
 

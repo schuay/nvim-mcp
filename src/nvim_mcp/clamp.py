@@ -41,19 +41,10 @@ class Root:
         `~` is not expanded: a client's path is data, not shell input, and
         expansion would resolve outside the root by design.
         """
-        candidate = Path(raw)
-        if not candidate.is_absolute():
-            candidate = self.path / candidate
-        try:
-            resolved = candidate.resolve()
-        except OSError as e:
-            # A symlink loop or an unreadable component refuses this one path
-            # rather than failing the whole call.
-            raise Refused(f"cannot resolve: {e.strerror or e}") from e
-        # Before the file is touched: whether a path outside the root exists is
-        # not this client's to learn.
-        if resolved != self.path and self.path not in resolved.parents:
-            raise Refused("outside the session root")
+        # The root check first: whether a path outside the root exists is not
+        # this client's to learn. A symlink loop or an unreadable component
+        # refuses this one path rather than failing the whole call.
+        resolved = self.locate(raw)
         try:
             mode = resolved.stat().st_mode
         except FileNotFoundError:
@@ -64,6 +55,25 @@ class Root:
             raise Refused(f"cannot resolve: {e.strerror or e}") from e
         if not stat.S_ISREG(mode):
             raise Refused("not a regular file")
+        return resolved
+
+    def locate(self, raw: str) -> Path:
+        """Return the path `raw` names inside this root, existing or not.
+
+        For a buffer the human has open: an agent that renamed or deleted the
+        file on disk must still be able to read what they are looking at. The
+        root check is the boundary and is unchanged; only the assertion that
+        something is there is left to the caller.
+        """
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = self.path / candidate
+        try:
+            resolved = candidate.resolve()
+        except OSError as e:
+            raise Refused(f"cannot resolve: {e.strerror or e}") from e
+        if resolved != self.path and self.path not in resolved.parents:
+            raise Refused("outside the session root")
         return resolved
 
     def contains(self, resolved: Path) -> bool:

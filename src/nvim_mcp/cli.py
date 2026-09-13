@@ -80,7 +80,7 @@ def cmd_new(args: argparse.Namespace) -> int:
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
             "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
-            "env": dict(os.environ),
+            "env": session_env(),
         }
     )
     if not reply["ok"]:
@@ -91,6 +91,45 @@ def cmd_new(args: argparse.Namespace) -> int:
     return 0
 
 
+#: What a session's nvim is given of the shell that asked for it. The whole
+#: environment used to go, and it is written to the state file with the
+#: session: an interactive shell carries tokens that have no business being
+#: there. These are what an editor needs to look and behave like the human's
+#: own -- where its tools are, what its terminal is, which display to open a
+#: window on -- plus the prefixes a session legitimately reads.
+ENV_KEEP = frozenset(
+    {
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "PATH",
+        "TERM",
+        "COLORTERM",
+        "TERM_PROGRAM",
+        "TERM_PROGRAM_VERSION",
+        "DISPLAY",
+        "WAYLAND_DISPLAY",
+        "TMUX",
+        "TZ",
+        "LANG",
+        "LANGUAGE",
+        "EDITOR",
+        "VISUAL",
+        "PAGER",
+    }
+)
+ENV_KEEP_PREFIXES = ("LC_", "XDG_", "NVIM_", "VIM")
+
+
+def session_env() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if name in ENV_KEEP or name.startswith(ENV_KEEP_PREFIXES)
+    }
+
+
 def _session_for(args: argparse.Namespace, command: str) -> dict[str, Any]:
     _ensure_broker()
     reply = _ask(
@@ -99,7 +138,7 @@ def _session_for(args: argparse.Namespace, command: str) -> dict[str, Any]:
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
             "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
-            "env": dict(os.environ),
+            "env": session_env(),
         },
         timeout=30.0,
     )

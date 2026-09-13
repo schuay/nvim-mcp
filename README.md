@@ -38,6 +38,8 @@ On your side:
   root. It goes to the clipboard register, so nvim picks the tool your session
   uses.
 - `:AgentPop` drops the top frame of notes; `:AgentDrop B` drops a named one.
+- A question keeps its `?>` sign until an agent acknowledges it, so a batch of
+  replies shows which ones have come back.
 - `:q` is safe. The broker holds the record of what is shown and starts nvim
   again, with the notes on the lines your edits moved them to.
 

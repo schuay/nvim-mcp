@@ -44,3 +44,19 @@ def test_a_root_reaches_the_command_through_main(
     monkeypatch.setattr(cli, "cmd_box", lambda args: seen.append(args.root) or 0)
     assert cli.main([command, str(tmp_path)]) == 0
     assert seen == [str(tmp_path)]
+
+
+def test_only_what_a_session_needs_leaves_the_shell(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
+    monkeypatch.setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
+    monkeypatch.setenv("NVIM_MCP_TERMINAL", "ghostty -e")
+    monkeypatch.setenv("PATH", "/usr/bin")
+    kept = cli.session_env()
+    # The whole environment used to go, and it is written to the state file
+    # with the session.
+    assert "ANTHROPIC_API_KEY" not in kept
+    assert "SSH_AUTH_SOCK" not in kept
+    assert kept["PATH"] == "/usr/bin"
+    assert kept["NVIM_MCP_TERMINAL"] == "ghostty -e"
