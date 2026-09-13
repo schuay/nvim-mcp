@@ -32,6 +32,7 @@ from .models import (
     Buffer,
     Cursor,
     Envelope,
+    FrameSummary,
     Mark,
     NotOpen,
     OutsideRoot,
@@ -52,8 +53,11 @@ SHOW_TOOL = types.Tool(
     description=(
         "Open locations in the human's nvim session: a tab per file, a quickfix "
         "list of the positions, and a highlight over any range, with each note "
-        "rendered above its line. Batch every location you are discussing into "
-        "one call. Replaces the previous show; never closes a tab."
+        "rendered above its line under an id like A2 that you and the human "
+        "can both say. Batch every location you are discussing into one call. "
+        "Notes live in frames: the default replaces the top frame, push starts "
+        "a frame for a digression, pop drops it when answered. Never closes a "
+        "tab."
     ),
     input_schema=models.schema(ShowRequest),
     output_schema=models.schema(ShowResult),
@@ -117,15 +121,31 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         )
 
     opened: list[str] = []
+    ids: list[str] = []
+    frame = session.frames[-1].letter if session.frames else None
     attached = await session.attached()
-    if locations:
-        result = await session.show(locations, title=request.title, focus=request.focus)
+    if locations or request.frame == "pop":
+        result = await session.show(
+            locations, title=request.title, focus=request.focus, frame=request.frame
+        )
         opened = result.get("opened", [])
+        ids = result["ids"]
+        frame = result["frame"]
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
 
-    return ShowResult(**_envelope(session, attached), opened=opened, refused=refused)
+    return ShowResult(
+        **_envelope(session, attached),
+        frame=frame,
+        ids=ids,
+        frames=[
+            FrameSummary(letter=f.letter, title=f.title, notes=len(f.notes))
+            for f in session.frames
+        ],
+        opened=opened,
+        refused=refused,
+    )
 
 
 async def _read(session: Session, request: ReadRequest) -> ReadResult:

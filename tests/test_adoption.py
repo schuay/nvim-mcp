@@ -113,7 +113,7 @@ async def test_a_crashed_broker_is_replaced_without_losing_the_editor(
         await wire.close()
         # The new broker's record has caught up with the edit made meanwhile.
         state = json.loads((paths.state_dir() / "sessions.json").read_text())
-        assert state["sessions"][0]["notes"][0]["line"] == 4
+        assert state["sessions"][0]["frames"][0]["notes"][0]["line"] == 4
     finally:
         await human.close()
         await stop_broker(stop, task)

@@ -26,7 +26,8 @@ from .paths import state_dir
 
 log = logging.getLogger(__name__)
 
-VERSION = 1
+#: 2: notes live in frames.
+VERSION = 2
 
 
 def path() -> Path:

@@ -9,7 +9,7 @@
 -- Client values arrive as arguments to nvim_exec_lua calls, never inside the
 -- code.
 
-local opts, notes = ...
+local opts, frames = ...
 local background = opts.background
 local group = vim.api.nvim_create_augroup('nvim-mcp', { clear = true })
 
@@ -18,10 +18,10 @@ local M = _G.NvimMcp
 --- The broker's channel. Human events go straight to it while it is open.
 M.chan = opts.chan
 M.text_limit = opts.text_limit
---- The notes the broker last sent, cached so a buffer read again can be
---- redrawn without a round trip. Their lines follow the anchors. A broker
---- that adopts a running nvim sends none and takes what is here.
-M.notes = notes or M.notes or {}
+--- The frames the broker last sent, bottom first, cached so a buffer read
+--- again can be redrawn without a round trip. Note lines follow the anchors.
+--- A broker that adopts a running nvim sends none and takes what is here.
+M.frames = frames or M.frames or {}
 --- Anchor extmark per note id, in the buffer holding the note. Created when
 --- the buffer is first drawn and never cleared by a redraw, so it is the one
 --- thing that keeps tracking the human's edits.
@@ -146,8 +146,11 @@ local function textwidth(buf)
   return math.max(40, vim.o.columns - 4)
 end
 
-local function fold(text, width)
-  local lines, line, indent = {}, '', '  '
+local function fold(text, width, prefix)
+  -- The prefix, the note's id, leads the first line; later lines hang under
+  -- the text so the id stays the one thing in its column.
+  local lines, line = {}, ''
+  local indent = '  ' .. prefix
   for word in text:gmatch('%S+') do
     if line == '' then
       line = indent .. word
@@ -155,7 +158,7 @@ local function fold(text, width)
       line = line .. ' ' .. word
     else
       lines[#lines + 1] = line
-      indent = '     '
+      indent = string.rep(' ', 2 + #prefix)
       line = indent .. word
     end
   end
@@ -168,6 +171,15 @@ local function loaded_buffers()
   local out = {}
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
     if vim.api.nvim_buf_is_loaded(buf) then out[#out + 1] = buf end
+  end
+  return out
+end
+
+--- Every live note with its frame, bottom frame first.
+local function notes()
+  local out = {}
+  for _, frame in ipairs(M.frames) do
+    for _, note in ipairs(frame.notes) do out[#out + 1] = { note = note, frame = frame } end
   end
   return out
 end
@@ -186,7 +198,8 @@ end
 
 --- Bring the cached lines up to date with the anchors, for one buffer or all.
 local function refresh(buf)
-  for _, note in ipairs(M.notes) do
+  for _, entry in ipairs(notes()) do
+    local note = entry.note
     local anchor = M.anchors[note.id]
     if anchor and (buf == nil or anchor.buf == buf) then
       local line, end_line = anchored(note)
@@ -220,7 +233,12 @@ function M.render(buf)
   refresh(buf)
   vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
   local last = vim.api.nvim_buf_line_count(buf)
-  for _, note in ipairs(M.notes) do
+  -- All bands above one line go in a single extmark, bottom frame first, so
+  -- an answer sits under the question it answers. nvim draws several marks
+  -- at one position in an order it does not promise.
+  local bands, rows = {}, {}
+  for _, entry in ipairs(notes()) do
+    local note = entry.note
     if note.file == name then
       local first = math.max(1, math.min(note.line or 1, last))
       local final = note.end_line and math.max(first, math.min(note.end_line, last)) or nil
@@ -236,17 +254,22 @@ function M.render(buf)
         })
       end
       if note.text and note.text ~= '' then
-        local lines = {}
-        for _, text in ipairs(fold(note.text, textwidth(buf))) do
+        if not bands[first] then
+          bands[first] = {}
+          rows[#rows + 1] = first
+        end
+        for _, text in ipairs(fold(note.text, textwidth(buf), note.id .. '  ')) do
           -- An empty final chunk extends the highlight to the end of the screen
           -- line, so the note reads as a band rather than coloured text.
-          lines[#lines + 1] = { { text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } }
+          table.insert(bands[first], { { text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } })
         end
-        vim.api.nvim_buf_set_extmark(buf, M.ns, first - 1, 0, {
-          virt_lines = lines, virt_lines_above = true,
-        })
       end
     end
+  end
+  for _, row in ipairs(rows) do
+    vim.api.nvim_buf_set_extmark(buf, M.ns, row - 1, 0, {
+      virt_lines = bands[row], virt_lines_above = true,
+    })
   end
 end
 
@@ -258,9 +281,17 @@ end
 function M.positions()
   refresh()
   local out = {}
-  for _, note in ipairs(M.notes) do
+  for _, entry in ipairs(notes()) do
+    local note = entry.note
     out[#out + 1] = { id = note.id, line = note.line, end_line = note.end_line }
   end
+  return out
+end
+
+--- The ids of every live note, bottom frame first.
+function M.ids()
+  local out = {}
+  for _, entry in ipairs(notes()) do out[#out + 1] = entry.note.id end
   return out
 end
 
@@ -275,14 +306,17 @@ function M.sync()
   return { positions = M.positions(), marks = marks }
 end
 
+--- The topmost note under a line, so a question lands on the newest thread.
 local function note_at(buf, line)
   local name = vim.api.nvim_buf_get_name(buf)
-  for _, note in ipairs(M.notes) do
+  local found = nil
+  for _, entry in ipairs(notes()) do
+    local note = entry.note
     if note.file == name and note.line <= line and line <= (note.end_line or note.line) then
-      return note.id
+      found = note.id
     end
   end
-  return nil
+  return found
 end
 
 local function displayed(buf)
@@ -300,45 +334,52 @@ local function scratch(win)
     and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == ''
 end
 
---- Replace what is shown with the broker's note set.
-function M.show(new_notes, show_opts)
+--- Draw the broker's frames. The top frame's files are opened and its
+--- positions fill the quickfix list; lower frames render wherever their
+--- files are already loaded.
+function M.show(new_frames, show_opts)
   local previous = vim.api.nvim_get_current_tabpage()
   for _, buf in ipairs(loaded_buffers()) do
     vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
     vim.api.nvim_buf_clear_namespace(buf, M.anchor_ns, 0, -1)
   end
   M.anchors = {}
-  M.notes = new_notes
+  M.frames = new_frames
+  local top = new_frames[#new_frames]
   local items, opened, seen = {}, {}, {}
-  for _, note in ipairs(new_notes) do
+  for _, note in ipairs(top and top.notes or {}) do
     -- bufadd takes the name literally. :edit and nvim_cmd would expand
     -- backticks in it and run a shell.
     local buf = vim.fn.bufadd(note.file)
-    vim.fn.bufload(buf)
-    -- bufadd leaves a buffer unlisted, which hides it from :ls and from
-    -- anything asking nvim what is open.
-    vim.bo[buf].buflisted = true
-    if not seen[note.file] then
-      seen[note.file] = true
-      opened[#opened + 1] = note.file
-      if not displayed(buf) then
-        if not scratch(vim.api.nvim_get_current_win()) then vim.cmd('tabnew') end
-        vim.api.nvim_win_set_buf(0, buf)
+    if show_opts.open then
+      vim.fn.bufload(buf)
+      -- bufadd leaves a buffer unlisted, which hides it from :ls and from
+      -- anything asking nvim what is open.
+      vim.bo[buf].buflisted = true
+      if not seen[note.file] then
+        seen[note.file] = true
+        opened[#opened + 1] = note.file
+        if not displayed(buf) then
+          if not scratch(vim.api.nvim_get_current_win()) then vim.cmd('tabnew') end
+          vim.api.nvim_win_set_buf(0, buf)
+        end
       end
     end
-    items[#items + 1] = {
-      bufnr = buf,
-      lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf))),
-      col = 1,
-      type = 'N',
-      text = note.text or '',
-    }
+    if vim.api.nvim_buf_is_loaded(buf) then
+      items[#items + 1] = {
+        bufnr = buf,
+        lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf))),
+        col = 1,
+        type = 'N',
+        text = note.id .. '  ' .. (note.text or ''),
+      }
+    end
   end
 
   M.render_all()
   vim.fn.setqflist(items, 'r')
-  vim.fn.setqflist({}, 'a', { title = show_opts.title })
-  if show_opts.focus then
+  vim.fn.setqflist({}, 'a', { title = top and top.title or '' })
+  if show_opts.focus and #items > 0 then
     vim.cmd('cfirst')
   else
     vim.api.nvim_set_current_tabpage(previous)
@@ -434,6 +475,18 @@ vim.api.nvim_create_autocmd('FileChangedShell', {
     vim.v.fcs_choice = vim.bo[ev.buf].modified and '' or 'reload'
   end,
 })
+
+-- Frames are the broker's to change. The human's pop goes to it as a request
+-- and comes back as a redraw; with the broker away there is nothing to change.
+local function request_pop(letter)
+  if not pcall(vim.rpcnotify, M.chan, 'nvim-mcp', 'pop', letter) then
+    vim.notify('nvim-mcp: broker away, cannot pop')
+  end
+end
+vim.api.nvim_create_user_command('AgentPop', function() request_pop(nil) end,
+  { desc = 'Drop the top frame of agent notes' })
+vim.api.nvim_create_user_command('AgentDrop', function(o) request_pop(o.args) end,
+  { nargs = 1, desc = 'Drop the named frame of agent notes' })
 
 -- The human's half of the conversation. `:Ask` hands a range to the agent.
 vim.api.nvim_create_user_command('Ask', function(o)

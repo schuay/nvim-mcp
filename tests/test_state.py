@@ -56,7 +56,7 @@ async def test_a_review_survives_a_broker_restart(runtime: Path, repo: Path) -> 
         await wire.close()
 
         nvim = await NvimRPC.connect(Path(listing[0]["socket"]))
-        notes = await nvim.lua("return NvimMcp.notes")
+        notes = await nvim.lua("return NvimMcp.frames[1].notes")
         assert [note["text"] for note in notes] == ["look here"]
         await nvim.close()
     finally:
@@ -121,7 +121,7 @@ async def test_ask_hands_a_range_to_the_agent(running_broker: Path, repo: Path) 
     assert (mark["line1"], mark["line2"]) == (3, 5)
     assert Path(mark["file"]).name == "main.c"
     # The note the question was asked on, so a reply threads onto it.
-    assert mark["note_id"] == 1
+    assert mark["note_id"] == "A1"
     # Reading is not answering: the question stays pending until acknowledged,
     # so a client that reads and then dies does not lose it.
     again = await call(wire, "read", session=session["key"], what="marks")

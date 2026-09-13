@@ -29,7 +29,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .clamp import Root
+from .clamp import Refused, Root
 from .lifecycle import Editor
 from .nvimrpc import NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
@@ -73,21 +73,66 @@ class Location:
     text: str = ""
 
 
+#: Frames a session may hold. At the cap a push is refused rather than the
+#: bottom frame dropped, and the cap is what keeps notes from pushing the code
+#: off the screen.
+FRAME_LIMIT = 4
+FRAME_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
+
+
 @dataclass
 class Note:
     """One annotated location, as the session records it.
 
-    The id is assigned by the session and never reused within it, so a mark
-    that names the note it was asked on keeps naming it after later shows.
-    The line is where nvim last reported the note, which follows the human's
-    edits.
+    The id is the frame's letter and a number the frame never reuses, so a
+    mark that names the note it was asked on keeps naming it after later
+    shows. The line is where nvim last reported the note, which follows the
+    human's edits.
     """
 
-    id: int
+    id: str
     file: str
     line: int
     end_line: int | None
     text: str
+
+
+@dataclass
+class Frame:
+    """One set of locations with its notes.
+
+    Frames stack: a review is a frame, a question asked in the middle of it is
+    a digression pushed above it and popped when answered. The letter is
+    taken at push time and held until the frame is popped, so popping a frame
+    below never renames the ones above.
+    """
+
+    letter: str
+    title: str = "agent"
+    notes: list[Note] = field(default_factory=list)
+    next_number: int = 1
+
+    def take_id(self) -> str:
+        note_id = f"{self.letter}{self.next_number}"
+        self.next_number += 1
+        return note_id
+
+    def state(self) -> dict[str, Any]:
+        return {
+            "letter": self.letter,
+            "title": self.title,
+            "notes": [asdict(note) for note in self.notes],
+            "next_number": self.next_number,
+        }
+
+    @classmethod
+    def restore(cls, state: dict[str, Any]) -> Frame:
+        return cls(
+            letter=state["letter"],
+            title=state.get("title", "agent"),
+            notes=[Note(**note) for note in state.get("notes", [])],
+            next_number=int(state.get("next_number", 1)),
+        )
 
 
 @dataclass
@@ -106,12 +151,10 @@ class Session:
     #: session sees the same PATH and display the human does. Kept for the
     #: respawn after `:q`.
     env: dict[str, str] | None = None
-    #: What the session shows and what the human has handed back. nvim draws
-    #: this; it does not own it.
-    notes: list[Note] = field(default_factory=list)
+    #: What the session shows, bottom frame first, and what the human has
+    #: handed back. nvim draws this; it does not own it.
+    frames: list[Frame] = field(default_factory=list)
     marks: list[dict[str, Any]] = field(default_factory=list)
-    next_note_id: int = 1
-    title: str = "agent"
     #: Called when the record changes outside a tool call, so the broker can
     #: save it. Marks and positions can arrive from nvim on their own.
     on_change: Callable[[], None] | None = None
@@ -120,6 +163,9 @@ class Session:
     #: that find the session dead at the same moment would otherwise each
     #: spawn an nvim, and only one of them would be the session's.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    #: Work started by a notification from nvim, which cannot be awaited on
+    #: the read loop. Kept so it is not collected before it runs.
+    _tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
         self.editor = Editor(
@@ -168,10 +214,8 @@ class Session:
             "clean": self.clean,
             "background": self.background,
             "env": self.env,
-            "notes": [asdict(note) for note in self.notes],
+            "frames": [frame.state() for frame in self.frames],
             "marks": self.marks,
-            "next_note_id": self.next_note_id,
-            "title": self.title,
         }
 
     @classmethod
@@ -184,16 +228,19 @@ class Session:
             env=state.get("env"),
             key=state["key"],
         )
-        session.notes = [Note(**note) for note in state.get("notes", [])]
+        session.frames = [Frame.restore(frame) for frame in state.get("frames", [])]
         session.marks = list(state.get("marks", []))
-        session.next_note_id = int(state.get("next_note_id", 1))
-        session.title = state.get("title", "agent")
         return session
 
-    async def _setup(self, notes: list[dict[str, Any]] | None) -> None:
+    @property
+    def notes(self) -> list[Note]:
+        """Every live note, bottom frame first."""
+        return [note for frame in self.frames for note in frame.notes]
+
+    async def _setup(self, frames: list[dict[str, Any]] | None) -> None:
         """Install the session's Lua in the connected nvim.
 
-        With notes, nvim starts drawing them; without, it keeps whatever it
+        With frames, nvim starts drawing them; without, it keeps whatever it
         already draws, which is what an adopted nvim should do.
         """
         assert self.rpc is not None
@@ -208,11 +255,11 @@ class Session:
         # No notes means no argument at all: a nil positional would reach Lua
         # as vim.NIL, which is not nil.
         await self.rpc.lua(
-            SESSION_INIT, options, *([notes] if notes is not None else [])
+            SESSION_INIT, options, *([frames] if frames is not None else [])
         )
 
-    def _notes_for_lua(self) -> list[dict[str, Any]]:
-        return [asdict(note) for note in self.notes]
+    def _frames_for_lua(self) -> list[dict[str, Any]]:
+        return [frame.state() for frame in self.frames]
 
     @property
     def alive(self) -> bool:
@@ -231,10 +278,10 @@ class Session:
     async def _ensure(self, spawn: bool = True) -> None:
         outcome = await self.editor.ensure(spawn)
         if outcome == "started":
-            await self._setup(self._notes_for_lua())
+            await self._setup(self._frames_for_lua())
             # After a restart this is what puts the review back in front of
             # the human. Nobody is attached yet, so there is no view to preserve.
-            if self.notes:
+            if self.frames:
                 await self._draw(focus=True)
         elif outcome == "adopted":
             # nvim has been on its own: it may hold moved notes and questions
@@ -242,18 +289,17 @@ class Session:
             await self._setup(None)
             assert self.rpc is not None
             self._absorb(await self.rpc.lua(SYNC))
-            shown = await self.rpc.lua(
-                "return vim.tbl_map(function(n) return n.id end, NvimMcp.notes)"
-            )
+            shown = await self.rpc.lua("return NvimMcp.ids()")
             if list(shown or []) != [note.id for note in self.notes]:
                 await self._draw(focus=False)
 
-    async def _draw(self, focus: bool) -> None:
+    async def _draw(self, focus: bool, open_files: bool = True) -> dict[str, Any]:
         assert self.rpc is not None
         result = await self.rpc.lua(
-            SHOW, self._notes_for_lua(), {"title": self.title, "focus": focus}
+            SHOW, self._frames_for_lua(), {"focus": focus, "open": open_files}
         )
         self._absorb(result["sync"])
+        return result
 
     async def _attempt(self, action: Callable[[], Awaitable[Any]]) -> Any:
         """Run one exchange with nvim, starting it again if it has gone.
@@ -270,39 +316,89 @@ class Session:
                 return await action()
 
     async def show(
-        self, locations: list[Location], title: str, focus: bool
+        self,
+        locations: list[Location],
+        title: str,
+        focus: bool,
+        frame: str = "replace",
     ) -> dict[str, Any]:
-        self.title = title
-        # The record changes first. If nvim has to be started for this call,
-        # startup draws the record, and this call then draws it again.
-        self.notes = [
-            Note(
-                id=self._take_note_id(),
-                file=str(loc.file),
-                line=loc.line,
-                end_line=loc.end_line,
-                text=one_line(loc.text),
-            )
-            for loc in locations
-        ]
+        """Change the frame stack and have nvim draw it.
+
+        `replace` swaps the top frame's contents, `push` opens a frame above
+        it, `pop` removes it. The record changes first: if nvim has to be
+        started for this call, startup draws the record, and this call then
+        draws it again.
+        """
+        if frame == "pop":
+            self._pop(None)
+            top = self.frames[-1] if self.frames else None
+        else:
+            if frame == "push" or not self.frames:
+                self._push()
+            top = self.frames[-1]
+            top.title = title
+            top.notes = [
+                Note(
+                    id=top.take_id(),
+                    file=str(loc.file),
+                    line=loc.line,
+                    end_line=loc.end_line,
+                    text=one_line(loc.text),
+                )
+                for loc in locations
+            ]
 
         async def run() -> Any:
             assert self.rpc is not None
             # Agent edits reach disk without passing through the broker, so
             # refresh before showing anything.
             await self.rpc.request("nvim_command", "checktime")
-            return await self.rpc.lua(
-                SHOW, self._notes_for_lua(), {"title": title, "focus": focus}
-            )
+            return await self._draw(focus=focus, open_files=frame != "pop")
 
         result = await self._attempt(run)
-        self._absorb(result["sync"])
+        result["frame"] = top.letter if top else None
+        result["ids"] = (
+            [note.id for note in top.notes] if top and frame != "pop" else []
+        )
         return result
 
-    def _take_note_id(self) -> int:
-        note_id = self.next_note_id
-        self.next_note_id += 1
-        return note_id
+    def _push(self) -> Frame:
+        if len(self.frames) >= FRAME_LIMIT:
+            raise Refused(f"frame stack is full; pop {self.frames[-1].letter} first")
+        taken = {frame.letter for frame in self.frames}
+        letter = next(letter for letter in FRAME_LETTERS if letter not in taken)
+        frame = Frame(letter=letter)
+        self.frames.append(frame)
+        return frame
+
+    def _pop(self, letter: str | None) -> Frame:
+        if not self.frames:
+            raise Refused("no frame to pop")
+        if letter is None:
+            return self.frames.pop()
+        for index, frame in enumerate(self.frames):
+            if frame.letter == letter:
+                return self.frames.pop(index)
+        raise Refused(f"no frame {letter}")
+
+    async def _human_pop(self, letter: str | None) -> None:
+        """Drop a frame at the human's request and redraw."""
+        async with self._lock:
+            if not self.alive:
+                return
+            try:
+                popped = self._pop(letter)
+            except Refused as e:
+                await self._tell_human(str(e))
+                return
+            await self._draw(focus=False, open_files=False)
+            self._changed()
+            await self._tell_human(f"popped {popped.letter}")
+
+    async def _tell_human(self, message: str) -> None:
+        assert self.rpc is not None
+        with contextlib.suppress(Exception):
+            await self.rpc.lua("vim.notify(...)", f"nvim-mcp: {message}")
 
     async def read(self, what: str, options: dict[str, Any]) -> dict[str, Any]:
         async def run() -> Any:
@@ -333,9 +429,16 @@ class Session:
         return bool(marks)
 
     def _on_notification(self, method: str, params: list[Any]) -> None:
-        if method == "nvim-mcp" and params and params[0] == "ask":
+        if method != "nvim-mcp" or not params:
+            return
+        if params[0] == "ask":
             self._absorb({"marks": [params[1]]})
             self._changed()
+        elif params[0] == "pop":
+            letter = params[1] if len(params) > 1 else None
+            task = asyncio.create_task(self._human_pop(letter))
+            self._tasks.add(task)
+            task.add_done_callback(self._tasks.discard)
 
     def _on_request(self, method: str, params: list[Any]) -> Any:
         if method == "nvim-mcp" and params and params[0] == "sync":

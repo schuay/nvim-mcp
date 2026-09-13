@@ -69,7 +69,7 @@ async def test_show_opens_a_tab_per_file_and_lists_positions(
     notes = [d["virt_lines"] for d in details if "virt_lines" in d]
     # The trailing empty chunk stretches the note's background to the end of the
     # screen line, so it reads as a band instead of a run of coloured text.
-    assert notes == [[[["  here", "NvimMcpNote"], ["", "NvimMcpNote"]]]]
+    assert notes == [[[["  A1  here", "NvimMcpNote"], ["", "NvimMcpNote"]]]]
     await nvim.close()
     await wire.close()
 

@@ -101,7 +101,7 @@ async def test_positions_survive_the_human_quitting(
 
     await session.ensure()
     again = await NvimRPC.connect(session.socket)
-    assert await again.lua("return NvimMcp.notes[1].line") == 4
+    assert await again.lua("return NvimMcp.frames[1].notes[1].line") == 4
     assert await decoration_rows(again) == [3, 3]
     await again.close()
 
@@ -114,7 +114,7 @@ async def test_a_question_reaches_the_record_as_it_is_asked(
     await human.request("nvim_command", "4Ask why?")
     await until(lambda: bool(session.marks))
     mark = session.marks[0]
-    assert (mark["id"], mark["note"], mark["note_id"]) == (1, "why?", 1)
+    assert (mark["id"], mark["note"], mark["note_id"]) == (1, "why?", "A1")
     assert mark["text"] == "int main(void) { return 0; }"
     assert mark["truncated"] is False
     assert saves == [1], "the broker was not told to save"
@@ -167,17 +167,17 @@ async def test_note_ids_are_never_reused(
         title="review",
         focus=True,
     )
-    assert [n.id for n in session.notes] == [2, 3]
+    assert [n.id for n in session.notes] == ["A2", "A3"]
     await human.request("nvim_command", "8Ask about the second")
     await until(lambda: bool(session.marks))
-    assert session.marks[0]["note_id"] == 3
+    assert session.marks[0]["note_id"] == "A3"
 
     await session.show([Location(repo / "README.md", text="third")], "t", True)
-    assert [n.id for n in session.notes] == [4]
-    assert session.marks[0]["note_id"] == 3, "an old question now names a new note"
+    assert [n.id for n in session.notes] == ["A4"]
+    assert session.marks[0]["note_id"] == "A3", "an old question now names a new note"
 
     restored = Session.restore(session.state())
-    assert restored.next_note_id == 5
+    assert restored.frames[0].next_number == 5
 
 
 async def test_a_long_question_carries_a_bounded_snapshot(
@@ -197,8 +197,8 @@ async def test_the_record_holds_nothing_of_nvims(
 ) -> None:
     await insert_above(human)
     await session.read("tabs", {})
-    (note,) = session.state()["notes"]
+    (note,) = session.state()["frames"][0]["notes"]
     assert set(note) == {"id", "file", "line", "end_line", "text"}
     assert Session.restore(session.state()).notes == [
-        Note(id=1, file=str(session.notes[0].file), line=4, end_line=6, text="note")
+        Note(id="A1", file=str(session.notes[0].file), line=4, end_line=6, text="note")
     ]

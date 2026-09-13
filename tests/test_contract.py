@@ -54,6 +54,7 @@ async def test_invalid_read_arguments_are_refused_before_reaching_nvim(
     ("arguments", "field"),
     [
         ({"locations": []}, "locations"),
+        ({"locations": [{"file": "src/main.c"}], "frame": "peek"}, "frame"),
         ({"locations": [{"file": "src/main.c", "line": "3"}]}, "line"),
         ({"locations": [{"file": "src/main.c", "col": 1}]}, "col"),
         ({"locations": [{"file": "src/main.c"}], "focus": "yes"}, "focus"),

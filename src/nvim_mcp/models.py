@@ -17,7 +17,7 @@ from __future__ import annotations
 
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 
 #: A review the human has to walk, not a dump. Beyond this the quickfix list
@@ -51,12 +51,29 @@ class LocationSpec(Request):
 
 
 class ShowRequest(Request):
-    locations: list[LocationSpec] = Field(min_length=1, max_length=LOCATION_LIMIT)
-    title: str = Field(default="agent", description="Label for the quickfix list")
+    locations: list[LocationSpec] = Field(
+        default_factory=list, max_length=LOCATION_LIMIT
+    )
+    frame: Literal["replace", "push", "pop"] = Field(
+        default="replace",
+        description=(
+            "replace swaps the top frame's notes; push opens a new frame above "
+            "it for a digression; pop drops the top frame and its notes"
+        ),
+    )
+    title: str = Field(
+        default="agent", description="Label for the frame and the quickfix list"
+    )
     focus: bool = Field(
         default=True, description="Jump the human's view to the first location"
     )
     session: str = SESSION_FIELD
+
+    @model_validator(mode="after")
+    def _locations_unless_pop(self) -> ShowRequest:
+        if self.frame != "pop" and not self.locations:
+            raise ValueError("locations are required unless frame is pop")
+        return self
 
 
 class ReadRequest(Request):
@@ -92,7 +109,20 @@ class Refusal(Result):
     reason: str
 
 
+class FrameSummary(Result):
+    letter: str
+    title: str
+    notes: int
+
+
 class ShowResult(Envelope):
+    frame: str | None = Field(
+        default=None, description="The frame acted on; absent once all are popped"
+    )
+    ids: list[str] = Field(
+        description="Ids of the notes just shown, in the order given, to refer to them by"
+    )
+    frames: list[FrameSummary] = Field(description="The stack, bottom first")
     opened: list[str] = Field(description="Files now shown, resolved")
     refused: list[Refusal] = Field(
         description="Locations not shown; one bad path does not spoil the rest"
@@ -105,8 +135,8 @@ class Mark(Result):
     line1: int
     line2: int
     note: str = Field(description="What the human typed after :Ask")
-    note_id: int | None = Field(
-        default=None, description="The note the question was asked on, if any"
+    note_id: str | None = Field(
+        default=None, description="The note the question was asked on, like A2"
     )
     modified: bool = Field(description="Whether the buffer had unsaved edits")
     text: str = Field(description="The lines as the human saw them")
