@@ -124,8 +124,6 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
-        for path in result.get("moved", []):
-            refused.append(Refusal(file=path, reason="path changed while opening"))
 
     return ShowResult(**_envelope(session, attached), opened=opened, refused=refused)
 

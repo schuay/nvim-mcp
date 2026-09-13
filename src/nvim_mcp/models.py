@@ -108,10 +108,9 @@ class Mark(Result):
     note_id: int | None = Field(
         default=None, description="The note the question was asked on, if any"
     )
-    modified: bool
-    text: str | None = Field(
-        default=None, description="The lines, sent only when unsaved"
-    )
+    modified: bool = Field(description="Whether the buffer had unsaved edits")
+    text: str = Field(description="The lines as the human saw them")
+    truncated: bool = Field(default=False, description="Whether text was cut short")
 
 
 class Buffer(Result):

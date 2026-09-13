@@ -59,6 +59,7 @@ class Broker:
             for state in store.load():
                 try:
                     session = Session.restore(state)
+                    session.on_change = self.save
                     await session.ensure()
                 except (OSError, RuntimeError, Refused):
                     log.exception("dropping session %s", state.get("sid"))
@@ -81,6 +82,7 @@ class Broker:
         async with self._lock:
             sid = self._next_id()
             session = Session.create(sid, root, clean=clean, background=background)
+            session.on_change = self.save
             await session.ensure()
             self.sessions[sid] = session
             self.save()

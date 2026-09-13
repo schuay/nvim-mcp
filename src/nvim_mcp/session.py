@@ -7,10 +7,11 @@ The session outlives both the terminal a human attaches and the agent that
 writes to it. Its id is the capability: it is created on the host with a root
 the human chooses, and holding the id is what authorizes a client to use it.
 
-The broker holds the durable copy of what a session shows and what the human
-has handed back, because nvim loses extmarks when a buffer unloads and loses
-everything when someone types `:q`. nvim keeps a copy of its own so it can
-redraw notes when a buffer is read again without asking the broker.
+The session is the record of what it shows and what the human has handed
+back. nvim draws that record and reports the two things only it can know:
+where a note has moved to as the human edits, and what the human asked. Both
+arrive as a sync with every exchange, and nvim hands over a final one before
+it exits. Notes carry nothing of nvim's, so the record survives it.
 """
 
 from __future__ import annotations
@@ -19,7 +20,7 @@ import asyncio
 import contextlib
 import secrets
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import asdict, dataclass, field
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -32,13 +33,17 @@ from .paths import nvim_socket
 #: it points at, however the editor folds it.
 NOTE_LIMIT = 400
 
+#: Bytes of buffer text a mark carries. A question is about a passage, and an
+#: agent that needs more can read the file.
+MARK_TEXT_LIMIT = 16 * 1024
+
 #: The Lua half of the session, run once per nvim. It is shipped beside this
 #: module rather than embedded in it so it reads as Lua.
 SESSION_INIT = resources.files(__package__).joinpath("session.lua").read_text()
 
 SHOW = "return NvimMcp.show(...)"
 READ = "return NvimMcp.read(...)"
-POSITIONS = "return NvimMcp.positions()"
+SYNC = "return NvimMcp.sync()"
 
 
 def one_line(text: str) -> str:
@@ -64,6 +69,23 @@ class Location:
 
 
 @dataclass
+class Note:
+    """One annotated location, as the session records it.
+
+    The id is assigned by the session and never reused within it, so a mark
+    that names the note it was asked on keeps naming it after later shows.
+    The line is where nvim last reported the note, which follows the human's
+    edits.
+    """
+
+    id: int
+    file: str
+    line: int
+    end_line: int | None
+    text: str
+
+
+@dataclass
 class Session:
     sid: str
     key: str
@@ -75,11 +97,15 @@ class Session:
     #: 'light' or 'dark', taken from the human's terminal. A headless nvim
     #: cannot detect it.
     background: str | None = None
-    #: What the session currently shows, and what the human has handed back.
-    #: Held here because nvim loses both when someone types `:q`.
-    notes: list[dict[str, Any]] = field(default_factory=list)
+    #: What the session shows and what the human has handed back. nvim draws
+    #: this; it does not own it.
+    notes: list[Note] = field(default_factory=list)
     marks: list[dict[str, Any]] = field(default_factory=list)
+    next_note_id: int = 1
     title: str = "agent"
+    #: Called when the record changes outside a tool call, so the broker can
+    #: save it. Marks and positions can arrive from nvim on their own.
+    on_change: Callable[[], None] | None = None
     process: asyncio.subprocess.Process | None = None
     rpc: NvimRPC | None = None
     #: Orders every exchange with nvim, including starting it. Two callers
@@ -117,8 +143,9 @@ class Session:
             "root": str(self.root.path),
             "clean": self.clean,
             "background": self.background,
-            "notes": self.notes,
+            "notes": [asdict(note) for note in self.notes],
             "marks": self.marks,
+            "next_note_id": self.next_note_id,
             "title": self.title,
         }
 
@@ -131,8 +158,9 @@ class Session:
             background=state.get("background"),
             key=state["key"],
         )
-        session.notes = list(state.get("notes", []))
+        session.notes = [Note(**note) for note in state.get("notes", [])]
         session.marks = list(state.get("marks", []))
+        session.next_note_id = int(state.get("next_note_id", 1))
         session.title = state.get("title", "agent")
         return session
 
@@ -148,32 +176,28 @@ class Session:
         )
         await self._await_socket()
         self.rpc = await NvimRPC.connect(self.socket)
-        # Hand nvim the notes it should be drawing. After a restart this is what
-        # puts the review back in front of the human.
-        await self.rpc.lua(SESSION_INIT, self.background, self.notes)
-        if self.notes:
-            await self.rpc.lua("NvimMcp.render_all()")
-            await self._requeue()
-
-    async def _requeue(self) -> None:
-        """Rebuild the quickfix list from the notes held here."""
-        assert self.rpc is not None
+        self.rpc.on_notification = self._on_notification
+        self.rpc.on_request = self._on_request
+        channel, _ = await self.rpc.request("nvim_get_api_info")
         await self.rpc.lua(
-            """
-            local title = ...
-            local items = {}
-            for _, note in ipairs(NvimMcp.notes) do
-              local buf = vim.fn.bufadd(note.file)
-              vim.fn.bufload(buf)
-              vim.bo[buf].buflisted = true
-              items[#items + 1] = { bufnr = buf, lnum = note.line, col = 1,
-                                    type = 'N', text = note.text or '' }
-            end
-            vim.fn.setqflist(items, 'r')
-            vim.fn.setqflist({}, 'a', { title = title })
-            """,
-            self.title,
+            SESSION_INIT,
+            {
+                "chan": channel,
+                "background": self.background,
+                "text_limit": MARK_TEXT_LIMIT,
+            },
+            self._notes_for_lua(),
         )
+        # After a restart this is what puts the review back in front of the
+        # human. Nobody is attached yet, so there is no view to preserve.
+        if self.notes:
+            result = await self.rpc.lua(
+                SHOW, self._notes_for_lua(), {"title": self.title, "focus": True}
+            )
+            self._absorb(result["sync"])
+
+    def _notes_for_lua(self) -> list[dict[str, Any]]:
+        return [asdict(note) for note in self.notes]
 
     async def _await_socket(self, timeout: float = 10.0) -> None:
         deadline = asyncio.get_running_loop().time() + timeout
@@ -236,15 +260,17 @@ class Session:
         self, locations: list[Location], title: str, focus: bool
     ) -> dict[str, Any]:
         self.title = title
-        payload = [
-            {
-                "id": index,
-                "file": str(loc.file),
-                "line": loc.line,
-                "end_line": loc.end_line,
-                "text": one_line(loc.text),
-            }
-            for index, loc in enumerate(locations, start=1)
+        # The record changes first. If nvim has to be started for this call,
+        # startup draws the record, and this call then draws it again.
+        self.notes = [
+            Note(
+                id=self._take_note_id(),
+                file=str(loc.file),
+                line=loc.line,
+                end_line=loc.end_line,
+                text=one_line(loc.text),
+            )
+            for loc in locations
         ]
 
         async def run() -> Any:
@@ -253,14 +279,17 @@ class Session:
             # refresh before showing anything.
             await self.rpc.request("nvim_command", "checktime")
             return await self.rpc.lua(
-                SHOW,
-                payload,
-                {"title": title, "focus": focus, "root": str(self.root.path)},
+                SHOW, self._notes_for_lua(), {"title": title, "focus": focus}
             )
 
         result = await self._attempt(run)
-        self._absorb(result)
+        self._absorb(result["sync"])
         return result
+
+    def _take_note_id(self) -> int:
+        note_id = self.next_note_id
+        self.next_note_id += 1
+        return note_id
 
     async def read(self, what: str, options: dict[str, Any]) -> dict[str, Any]:
         async def run() -> Any:
@@ -269,16 +298,42 @@ class Session:
             return await self.rpc.lua(READ, what, options)
 
         result = await self._attempt(run)
-        self._absorb(result)
+        self._absorb(result["sync"])
         return result
 
-    def _absorb(self, result: dict[str, Any]) -> None:
-        """Take everything nvim reports back into the durable copy."""
-        if isinstance(result.get("notes"), list):
-            self.notes = result["notes"]
-        for mark in result.get("marks") or []:
+    def _absorb(self, sync: dict[str, Any]) -> bool:
+        """Take what nvim reports into the record.
+
+        Positions are applied by note id, so a report about a note set that a
+        later show has already replaced changes nothing.
+        """
+        by_id = {note.id: note for note in self.notes}
+        for position in sync.get("positions") or []:
+            note = by_id.get(position.get("id"))
+            if note is not None:
+                note.line = position["line"]
+                note.end_line = position.get("end_line")
+        marks = sync.get("marks") or []
+        for mark in marks:
             mark["id"] = len(self.marks) + 1
             self.marks.append(mark)
+        return bool(marks)
+
+    def _on_notification(self, method: str, params: list[Any]) -> None:
+        if method == "nvim-mcp" and params and params[0] == "ask":
+            self._absorb({"marks": [params[1]]})
+            self._changed()
+
+    def _on_request(self, method: str, params: list[Any]) -> Any:
+        if method == "nvim-mcp" and params and params[0] == "sync":
+            self._absorb(params[1])
+            self._changed()
+            return True
+        raise ValueError(f"unknown request {method} {params[:1]}")
+
+    def _changed(self) -> None:
+        if self.on_change is not None:
+            self.on_change()
 
     async def attached(self) -> bool:
         """Report whether a UI is on this session's nvim.
@@ -298,6 +353,10 @@ class Session:
     async def close(self) -> None:
         async with self._lock:
             if self.rpc is not None:
+                # Take the final sync ourselves: once qall! goes out nvim's own
+                # hand-over finds this connection already closing.
+                with contextlib.suppress(Exception):
+                    self._absorb(await self.rpc.lua(SYNC))
                 with contextlib.suppress(Exception):
                     await self.rpc.notify("nvim_command", "qall!")
                 await self.rpc.close()

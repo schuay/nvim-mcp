@@ -1,19 +1,37 @@
 -- Copyright 2026 The nvim-mcp developers
 -- SPDX-License-Identifier: MIT
 
--- The session's half inside nvim. Run once by the broker after connecting,
--- with the terminal background and the notes to draw as arguments. Client
--- values arrive as arguments to nvim_exec_lua calls, never inside the code.
+-- The session's half inside nvim. Run once by the broker after connecting.
+--
+-- The broker holds the record of what a session shows and what the human has
+-- handed back; this side draws it and reports what only nvim can know: where a
+-- note's anchor has moved to as the human edits, and what the human asked.
+-- Client values arrive as arguments to nvim_exec_lua calls, never inside the
+-- code.
 
-local background, notes = ...
+local opts, notes = ...
+local background = opts.background
 local group = vim.api.nvim_create_augroup('nvim-mcp', { clear = true })
 
 _G.NvimMcp = _G.NvimMcp or {}
 local M = _G.NvimMcp
+--- The broker's channel. Human events go straight to it while it is open.
+M.chan = opts.chan
+M.text_limit = opts.text_limit
+--- The notes the broker last sent, cached so a buffer read again can be
+--- redrawn without a round trip. Their lines follow the anchors.
 M.notes = notes or {}
-M.marks = M.marks or {}
+--- Anchor extmark per note id, in the buffer holding the note. Created when
+--- the buffer is first drawn and never cleared by a redraw, so it is the one
+--- thing that keeps tracking the human's edits.
+M.anchors = {}
+--- Marks the broker has not received: only those made while its channel was
+--- closed. They go out with the next sync.
+M.pending = {}
 M.ns = vim.api.nvim_create_namespace('nvim-mcp-show')
+M.anchor_ns = vim.api.nvim_create_namespace('nvim-mcp-anchor')
 M.ask_ns = vim.api.nvim_create_namespace('nvim-mcp-ask')
+
 
 local function options()
   -- The session is headless, so it never queried the terminal. Without this it
@@ -144,20 +162,69 @@ local function fold(text, width)
   return lines
 end
 
+
+local function loaded_buffers()
+  local out = {}
+  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+    if vim.api.nvim_buf_is_loaded(buf) then out[#out + 1] = buf end
+  end
+  return out
+end
+
+--- Where a note's anchor is now, or nil if its buffer is not loaded.
+local function anchored(note)
+  local anchor = M.anchors[note.id]
+  if not anchor or not vim.api.nvim_buf_is_loaded(anchor.buf) then return nil end
+  local at = vim.api.nvim_buf_get_extmark_by_id(anchor.buf, M.anchor_ns, anchor.mark,
+                                                { details = true })
+  if not at[1] then return nil end
+  local line = at[1] + 1
+  if not note.end_line then return line, nil end
+  return line, math.max(line, (at[3].end_row or at[1]) + 1)
+end
+
+--- Bring the cached lines up to date with the anchors, for one buffer or all.
+local function refresh(buf)
+  for _, note in ipairs(M.notes) do
+    local anchor = M.anchors[note.id]
+    if anchor and (buf == nil or anchor.buf == buf) then
+      local line, end_line = anchored(note)
+      if line then note.line, note.end_line = line, end_line end
+    end
+  end
+end
+
+local function anchor(buf, note, first, final)
+  local existing = M.anchors[note.id]
+  if existing and existing.buf == buf
+     and vim.api.nvim_buf_get_extmark_by_id(buf, M.anchor_ns, existing.mark, {})[1] then
+    return
+  end
+  local extra = {}
+  if final then extra.end_row, extra.end_col = final - 1, 0 end
+  M.anchors[note.id] = {
+    buf = buf, mark = vim.api.nvim_buf_set_extmark(buf, M.anchor_ns, first - 1, 0, extra),
+  }
+end
+
 --- Draw the notes belonging to one buffer.
 ---
 --- Called again whenever a buffer is read, because unloading a buffer drops
 --- every extmark in it and the human closing a file must not lose the review.
+--- Decorations are rebuilt from scratch; anchors are kept, and read first, so
+--- a redraw lands where the human's edits have moved the note.
 function M.render(buf)
   if not vim.api.nvim_buf_is_loaded(buf) then return end
   local name = vim.api.nvim_buf_get_name(buf)
+  refresh(buf)
   vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
   local last = vim.api.nvim_buf_line_count(buf)
   for _, note in ipairs(M.notes) do
     if note.file == name then
       local first = math.max(1, math.min(note.line or 1, last))
-      if note.end_line then
-        local final = math.max(first, math.min(note.end_line, last))
+      local final = note.end_line and math.max(first, math.min(note.end_line, last)) or nil
+      anchor(buf, note, first, final)
+      if final then
         local end_row, end_col = final, 0
         if final >= last then
           end_row = last - 1
@@ -174,7 +241,7 @@ function M.render(buf)
           -- line, so the note reads as a band rather than coloured text.
           lines[#lines + 1] = { { text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } }
         end
-        note.mark = vim.api.nvim_buf_set_extmark(buf, M.ns, first - 1, 0, {
+        vim.api.nvim_buf_set_extmark(buf, M.ns, first - 1, 0, {
           virt_lines = lines, virt_lines_above = true,
         })
       end
@@ -183,29 +250,31 @@ function M.render(buf)
 end
 
 function M.render_all()
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do M.render(buf) end
+  for _, buf in ipairs(loaded_buffers()) do M.render(buf) end
 end
 
---- Take the notes' current lines from their extmarks.
----
---- The human edits around a note, and the mark moves with the text while the
---- line number the agent sent does not.
+--- The current line of every note, by id.
 function M.positions()
+  refresh()
+  local out = {}
   for _, note in ipairs(M.notes) do
-    local buf = vim.fn.bufnr(note.file)
-    if note.mark and buf ~= -1 and vim.api.nvim_buf_is_loaded(buf) then
-      local at = vim.api.nvim_buf_get_extmark_by_id(buf, M.ns, note.mark, {})
-      if at[1] then
-        local moved = at[1] + 1 - note.line
-        note.line = at[1] + 1
-        if note.end_line then note.end_line = note.end_line + moved end
-      end
-    end
+    out[#out + 1] = { id = note.id, line = note.line, end_line = note.end_line }
   end
-  return M.notes
+  return out
 end
 
-function M.note_at(buf, line)
+--- Everything the broker's record is missing. Returned with every call and
+--- handed over on exit.
+function M.sync()
+  local marks = M.pending
+  M.pending = {}
+  for _, buf in ipairs(loaded_buffers()) do
+    vim.api.nvim_buf_clear_namespace(buf, M.ask_ns, 0, -1)
+  end
+  return { positions = M.positions(), marks = marks }
+end
+
+local function note_at(buf, line)
   local name = vim.api.nvim_buf_get_name(buf)
   for _, note in ipairs(M.notes) do
     if note.file == name and note.line <= line and line <= (note.end_line or note.line) then
@@ -213,18 +282,6 @@ function M.note_at(buf, line)
     end
   end
   return nil
-end
-
---- Hand the marks the human has made to the broker, and forget them here.
-function M.drain()
-  local taken = M.marks
-  M.marks = {}
-  for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-    if vim.api.nvim_buf_is_loaded(buf) then
-      vim.api.nvim_buf_clear_namespace(buf, M.ask_ns, 0, -1)
-    end
-  end
-  return taken
 end
 
 local function displayed(buf)
@@ -242,55 +299,50 @@ local function scratch(win)
     and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == ''
 end
 
-function M.show(locs, opts)
+--- Replace what is shown with the broker's note set.
+function M.show(new_notes, show_opts)
   local previous = vim.api.nvim_get_current_tabpage()
-  local items, opened, seen, moved = {}, {}, {}, {}
-  M.notes = {}
-  for _, loc in ipairs(locs) do
-    -- The path was resolved before this call. Resolve it again here, because
-    -- the agent holds the root read-write and could have pointed a component
-    -- somewhere else in between. This narrows that window; it does not close
-    -- it, since nvim opens by name and not by descriptor.
-    local real = vim.uv.fs_realpath(loc.file)
-    if real == opts.root or (real and real:sub(1, #opts.root + 1) == opts.root .. '/') then
-      -- bufadd takes the name literally. :edit and nvim_cmd would expand
-      -- backticks in it and run a shell.
-      local buf = vim.fn.bufadd(loc.file)
-      vim.fn.bufload(buf)
-      -- bufadd leaves a buffer unlisted, which hides it from :ls and from
-      -- anything asking nvim what is open.
-      vim.bo[buf].buflisted = true
-      if not seen[loc.file] then
-        seen[loc.file] = true
-        opened[#opened + 1] = loc.file
-        if not displayed(buf) then
-          if not scratch(vim.api.nvim_get_current_win()) then vim.cmd('tabnew') end
-          vim.api.nvim_win_set_buf(0, buf)
-        end
+  for _, buf in ipairs(loaded_buffers()) do
+    vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
+    vim.api.nvim_buf_clear_namespace(buf, M.anchor_ns, 0, -1)
+  end
+  M.anchors = {}
+  M.notes = new_notes
+  local items, opened, seen = {}, {}, {}
+  for _, note in ipairs(new_notes) do
+    -- bufadd takes the name literally. :edit and nvim_cmd would expand
+    -- backticks in it and run a shell.
+    local buf = vim.fn.bufadd(note.file)
+    vim.fn.bufload(buf)
+    -- bufadd leaves a buffer unlisted, which hides it from :ls and from
+    -- anything asking nvim what is open.
+    vim.bo[buf].buflisted = true
+    if not seen[note.file] then
+      seen[note.file] = true
+      opened[#opened + 1] = note.file
+      if not displayed(buf) then
+        if not scratch(vim.api.nvim_get_current_win()) then vim.cmd('tabnew') end
+        vim.api.nvim_win_set_buf(0, buf)
       end
-      M.notes[#M.notes + 1] = loc
-      items[#items + 1] = {
-        bufnr = buf,
-        lnum = math.max(1, math.min(loc.line or 1, vim.api.nvim_buf_line_count(buf))),
-        col = 1,
-        type = 'N',
-        text = loc.text or '',
-      }
-    else
-      moved[#moved + 1] = loc.file
     end
+    items[#items + 1] = {
+      bufnr = buf,
+      lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf))),
+      col = 1,
+      type = 'N',
+      text = note.text or '',
+    }
   end
 
   M.render_all()
   vim.fn.setqflist(items, 'r')
-  vim.fn.setqflist({}, 'a', { title = opts.title })
-  if opts.focus then
+  vim.fn.setqflist({}, 'a', { title = show_opts.title })
+  if show_opts.focus then
     vim.cmd('cfirst')
   else
     vim.api.nvim_set_current_tabpage(previous)
   end
-  return { opened = opened, moved = moved, uis = #vim.api.nvim_list_uis(),
-           marks = M.drain(), notes = M.notes }
+  return { opened = opened, uis = #vim.api.nvim_list_uis(), sync = M.sync() }
 end
 
 local function buffer_state(buf)
@@ -306,41 +358,39 @@ local function buffer_state(buf)
   }
 end
 
-function M.read(what, opts)
-  if what == 'marks' then
-    return { marks = M.drain() }
-  elseif what == 'cursor' then
+function M.read(what, read_opts)
+  local result = {}
+  if what == 'cursor' then
     local buf = vim.api.nvim_get_current_buf()
     local at = vim.api.nvim_win_get_cursor(0)
     local state = buffer_state(buf)
     state.line, state.col = at[1], at[2] + 1
     local from, to = vim.fn.line("'<"), vim.fn.line("'>")
     if from > 0 and to > 0 then state.selection = { from, to } end
-    return { cursor = state, marks = M.drain() }
+    result.cursor = state
   elseif what == 'range' then
-    local buf = vim.fn.bufnr(opts.file)
-    if buf == -1 or not vim.api.nvim_buf_is_loaded(buf) then
-      return { open = false, marks = M.drain() }
-    end
-    local state = buffer_state(buf)
-    if not state.readable then return { open = false, marks = M.drain() } end
-    local last = vim.api.nvim_buf_line_count(buf)
-    local first = math.max(1, math.min(opts.start_line or 1, last))
-    local final = math.max(first, math.min(opts.end_line or last, last))
-    state.open = true
-    state.start_line, state.end_line = first, final
-    state.text = table.concat(vim.api.nvim_buf_get_lines(buf, first - 1, final, false), '\n')
-    return { range = state, marks = M.drain() }
-  elseif what == 'tabs' then
-    local buffers = {}
-    for _, buf in ipairs(vim.api.nvim_list_bufs()) do
-      if vim.bo[buf].buflisted and vim.api.nvim_buf_is_loaded(buf) then
-        buffers[#buffers + 1] = buffer_state(buf)
+    local buf = vim.fn.bufnr(read_opts.file)
+    if buf ~= -1 and vim.api.nvim_buf_is_loaded(buf) then
+      local state = buffer_state(buf)
+      if state.readable then
+        local last = vim.api.nvim_buf_line_count(buf)
+        local first = math.max(1, math.min(read_opts.start_line or 1, last))
+        local final = math.max(first, math.min(read_opts.end_line or last, last))
+        state.open = true
+        state.start_line, state.end_line = first, final
+        state.text = table.concat(vim.api.nvim_buf_get_lines(buf, first - 1, final, false), '\n')
+        result.range = state
       end
     end
-    return { buffers = buffers, marks = M.drain() }
+  elseif what == 'tabs' then
+    local buffers = {}
+    for _, buf in ipairs(loaded_buffers()) do
+      if vim.bo[buf].buflisted then buffers[#buffers + 1] = buffer_state(buf) end
+    end
+    result.buffers = buffers
   end
-  return { marks = M.drain() }
+  result.sync = M.sync()
+  return result
 end
 
 -- nvim listens on its socket before it has finished starting, so this runs
@@ -361,9 +411,18 @@ vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWinEnter' }, {
   group = group,
   callback = function(ev) M.render(ev.buf) end,
 })
-vim.api.nvim_create_autocmd({ 'BufUnload', 'BufWritePost' }, {
+-- The anchors go with the buffer. Take their last positions into the cache so
+-- the notes come back on the right lines when it is read again.
+vim.api.nvim_create_autocmd('BufUnload', {
   group = group,
-  callback = function() M.positions() end,
+  callback = function(ev) refresh(ev.buf) end,
+})
+-- Hand over what the broker has not seen before this nvim is gone. A request
+-- rather than a notification, so exit waits for the broker to take it; if the
+-- broker is away there is nobody to wait for.
+vim.api.nvim_create_autocmd('VimLeavePre', {
+  group = group,
+  callback = function() pcall(vim.rpcrequest, M.chan, 'nvim-mcp', 'sync', M.sync()) end,
 })
 
 -- Answer the file-changed prompt ourselves. Left to nvim it blocks the RPC
@@ -375,29 +434,33 @@ vim.api.nvim_create_autocmd('FileChangedShell', {
   end,
 })
 
--- The human's half of the conversation. `:Ask` queues a range for the agent,
--- which collects it on its next call. Queuing locally rather than notifying the
--- agent's channel keeps a question through a broker restart, and keeps this
--- working in any client, not only ones that can be woken.
+-- The human's half of the conversation. `:Ask` hands a range to the agent.
 vim.api.nvim_create_user_command('Ask', function(o)
   local buf = vim.api.nvim_get_current_buf()
+  refresh(buf)
+  -- The text as the human saw it. The file may change before the agent
+  -- reads it, and an agent in a sandbox may not be able to read it at all.
+  local text = table.concat(vim.api.nvim_buf_get_lines(buf, o.line1 - 1, o.line2, false), '\n')
+  local truncated = #text > M.text_limit
+  if truncated then text = text:sub(1, M.text_limit) end
   local mark = {
     file = vim.api.nvim_buf_get_name(buf),
     line1 = o.line1,
     line2 = o.line2,
     note = o.args,
     modified = vim.bo[buf].modified,
-    note_id = M.note_at(buf, o.line1),
+    note_id = note_at(buf, o.line1),
+    text = text,
+    truncated = truncated,
   }
-  -- Send the text only when the file on disk no longer has it. The agent can
-  -- read an unmodified file itself.
-  if mark.modified then
-    mark.text = table.concat(vim.api.nvim_buf_get_lines(buf, o.line1 - 1, o.line2, false), '\n')
-  end
-  M.marks[#M.marks + 1] = mark
+  -- Straight to the broker while its channel is open, so the question is
+  -- recorded before this nvim can be quit. Otherwise held for the next sync.
+  local delivered = pcall(vim.rpcnotify, M.chan, 'nvim-mcp', 'ask', mark)
+  if not delivered then M.pending[#M.pending + 1] = mark end
   vim.api.nvim_buf_set_extmark(buf, M.ask_ns, o.line1 - 1, 0, {
     end_row = o.line2 - 1, end_col = 0, sign_text = '?>', sign_hl_group = 'NvimMcpAsk',
     line_hl_group = 'NvimMcpAsk', strict = false,
   })
-  vim.notify(('nvim-mcp: %d question(s) waiting for the agent'):format(#M.marks))
+  vim.notify(delivered and 'nvim-mcp: question handed to the agent'
+             or 'nvim-mcp: broker away, question kept for it')
 end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' })

@@ -4,8 +4,9 @@
 """Speak msgpack-RPC to a running nvim over a UNIX socket.
 
 nvim answers requests in reverse order of arrival, so responses are matched by
-message id rather than by position. Notifications arrive unsolicited on the same
-connection and go to a callback.
+message id rather than by position. Notifications and requests from nvim arrive
+unsolicited on the same connection and go to callbacks; a request is answered
+with whatever the callback returns.
 """
 
 from __future__ import annotations
@@ -55,6 +56,9 @@ class NvimRPC:
         self._closed = False
         self._task = asyncio.create_task(self._read_loop())
         self.on_notification: Callable[[str, list[Any]], None] | None = None
+        #: Answers a request nvim makes of us. Runs on the read loop, so it
+        #: must not wait on anything that needs the loop.
+        self.on_request: Callable[[str, list[Any]], Any] | None = None
 
     @property
     def closed(self) -> bool:
@@ -146,6 +150,17 @@ class NvimRPC:
                 future.set_result(result)
         elif kind == NOTIFICATION and self.on_notification:
             self.on_notification(message[1], message[2])
+        elif kind == REQUEST:
+            _, msgid, method, params = message
+            error, result = None, None
+            if self.on_request is None:
+                error = f"unhandled request {method}"
+            else:
+                try:
+                    result = self.on_request(method, params)
+                except Exception as e:
+                    error = str(e)
+            self._writer.write(msgpack.packb([RESPONSE, msgid, error, result]))
 
 
 def lua_value(value: Any) -> Any:
