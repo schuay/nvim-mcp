@@ -31,7 +31,12 @@ nv = "nvim_mcp.cli:main"
 Repository = "https://github.com/schuay/nvim-mcp"
 
 [dependency-groups]
-dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+dev = [
+    "hatchling>=1.32.0",
+    "pytest>=8",
+    "pytest-asyncio>=1.0",
+    "ruff>=0.15",
+]
 
 [build-system]
 requires = ["hatchling"]

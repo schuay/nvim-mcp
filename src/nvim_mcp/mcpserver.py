@@ -24,38 +24,27 @@ import anyio
 import mcp_types as types
 from mcp.server.lowlevel import Server
 from mcp.shared.message import SessionMessage
+from pydantic import ValidationError
 
+from . import models
 from .clamp import Refused
+from .models import (
+    Buffer,
+    Cursor,
+    Envelope,
+    Mark,
+    NotOpen,
+    OutsideRoot,
+    Range,
+    ReadRequest,
+    ReadResult,
+    Refusal,
+    ShowRequest,
+    ShowResult,
+)
 from .session import Location, Session
 
 log = logging.getLogger(__name__)
-
-#: A review the human has to walk, not a dump. Beyond this the quickfix list
-#: stops being something anyone reads to the end.
-LOCATION_LIMIT = 50
-
-LOCATION_SCHEMA = {
-    "type": "object",
-    "properties": {
-        "file": {
-            "type": "string",
-            "description": "Path, absolute or relative to the session root",
-        },
-        "line": {"type": "integer", "description": "1-based line; defaults to 1"},
-        "end_line": {
-            "type": "integer",
-            "description": "Last line of a highlighted range",
-        },
-        "text": {
-            "type": "string",
-            "description": "One-line note, shown above the line and in the quickfix list",
-        },
-    },
-    "required": ["file"],
-    "additionalProperties": False,
-}
-
-SESSION_ARG = {"type": "string", "description": "Session key, as printed by `nv new`"}
 
 SHOW_TOOL = types.Tool(
     name="show",
@@ -66,25 +55,8 @@ SHOW_TOOL = types.Tool(
         "rendered above its line. Batch every location you are discussing into "
         "one call. Replaces the previous show; never closes a tab."
     ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "locations": {
-                "type": "array",
-                "items": LOCATION_SCHEMA,
-                "minItems": 1,
-                "maxItems": LOCATION_LIMIT,
-            },
-            "title": {"type": "string", "description": "Label for the quickfix list"},
-            "focus": {
-                "type": "boolean",
-                "description": "Jump the human's view to the first location. Default true.",
-            },
-            "session": SESSION_ARG,
-        },
-        "required": ["locations", "session"],
-        "additionalProperties": False,
-    },
+    input_schema=models.schema(ShowRequest),
+    output_schema=models.schema(ShowResult),
 )
 
 READ_TOOL = types.Tool(
@@ -94,31 +66,13 @@ READ_TOOL = types.Tool(
         "Read the human's session. 'marks' collects the ranges they handed over "
         "with :Ask, each with their question; call it when they refer to "
         "something they marked, and pass the ids back in 'ack' once you have "
-        "answered them, or they stay pending and come back. 'cursor' is where they are now and what they "
-        "last selected. 'range' reads an open buffer, including edits they have "
-        "not saved. 'tabs' lists what is open. Everything but 'marks' is limited "
-        "to the session root."
+        "answered them, or they stay pending and come back. 'cursor' is where "
+        "they are now and what they last selected. 'range' reads an open "
+        "buffer, including edits they have not saved. 'tabs' lists what is "
+        "open. Everything but 'marks' is limited to the session root."
     ),
-    input_schema={
-        "type": "object",
-        "properties": {
-            "what": {"type": "string", "enum": ["marks", "cursor", "range", "tabs"]},
-            "file": {"type": "string", "description": "With what='range'"},
-            "start_line": {"type": "integer", "description": "1-based, inclusive"},
-            "end_line": {"type": "integer", "description": "1-based, inclusive"},
-            "ack": {
-                "type": "array",
-                "items": {"type": "integer"},
-                "description": (
-                    "Mark ids you have now dealt with. Until you acknowledge a "
-                    "mark it stays pending and is handed to you again."
-                ),
-            },
-            "session": SESSION_ARG,
-        },
-        "required": ["what", "session"],
-        "additionalProperties": False,
-    },
+    input_schema=models.schema(ReadRequest),
+    output_schema=models.schema(ReadResult),
 )
 
 SessionLookup = Callable[[str], Session | None]
@@ -136,105 +90,97 @@ def pending(session: Session) -> list[dict[str, Any]]:
     return [mark for mark in session.marks if not mark.get("acked")]
 
 
-def _envelope(session: Session, **extra: Any) -> dict[str, Any]:
-    """Add the state every result carries.
-
-    An agent learns about a waiting question from any call it happens to make,
-    so noticing one costs nothing extra.
-    """
+def _envelope(session: Session, attached: bool) -> dict[str, Any]:
     return {
         "session": session.sid,
         "attach_cmd": f"nv {session.sid}",
         "marks_pending": len(pending(session)),
-        **extra,
+        "attached": attached,
     }
 
 
-async def _show(session: Session, params: dict[str, Any]) -> dict[str, Any]:
+async def _show(session: Session, request: ShowRequest) -> ShowResult:
     locations, refused = [], []
-    requested = params["locations"]
-    for raw in requested[:LOCATION_LIMIT]:
+    for spec in request.locations:
         try:
             # Resolve once. The path that goes to nvim is the one that passed
             # the clamp, so there is no second resolution to disagree with it.
-            resolved = session.root.resolve(raw["file"])
+            resolved = session.root.resolve(spec.file)
         except Refused as e:
             # One bad path does not spoil the rest of a review.
-            refused.append({"file": raw["file"], "reason": str(e)})
+            refused.append(Refusal(file=spec.file, reason=str(e)))
             continue
         locations.append(
             Location(
-                file=resolved,
-                line=raw.get("line", 1),
-                end_line=raw.get("end_line"),
-                text=raw.get("text", ""),
+                file=resolved, line=spec.line, end_line=spec.end_line, text=spec.text
             )
-        )
-    for raw in requested[LOCATION_LIMIT:]:
-        refused.append(
-            {"file": raw["file"], "reason": f"over the {LOCATION_LIMIT} location limit"}
         )
 
     opened: list[str] = []
     attached = await session.attached()
     if locations:
-        result = await session.show(
-            locations,
-            title=params.get("title", "agent"),
-            focus=params.get("focus", True),
-        )
+        result = await session.show(locations, title=request.title, focus=request.focus)
         opened = result.get("opened", [])
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
         for path in result.get("moved", []):
-            refused.append({"file": path, "reason": "path changed while opening"})
+            refused.append(Refusal(file=path, reason="path changed while opening"))
 
-    return _envelope(session, attached=attached, opened=opened, refused=refused)
+    return ShowResult(**_envelope(session, attached), opened=opened, refused=refused)
 
 
-async def _read(session: Session, params: dict[str, Any]) -> dict[str, Any]:
-    what = params["what"]
-    acknowledged = set(params.get("ack") or [])
+async def _read(session: Session, request: ReadRequest) -> ReadResult:
+    acknowledged = set(request.ack)
     for mark in session.marks:
         if mark.get("id") in acknowledged:
             mark["acked"] = True
     options: dict[str, Any] = {}
-    if what == "range":
-        if not params.get("file"):
+    if request.what == "range":
+        if not request.file:
             raise Refused("read(what='range') needs a file")
         options = {
-            "file": str(session.root.resolve(params["file"])),
-            "start_line": params.get("start_line"),
-            "end_line": params.get("end_line"),
+            "file": str(session.root.resolve(request.file)),
+            "start_line": request.start_line,
+            "end_line": request.end_line,
         }
 
-    result = await session.read(what, options)
+    result = await session.read(request.what, options)
     attached = await session.attached()
+    envelope = _envelope(session, attached)
 
-    if what == "marks":
-        return _envelope(session, attached=attached, marks=pending(session))
-
-    payload: dict[str, Any] = {}
-    if what == "cursor":
-        cursor = result.get("cursor") or {}
-        payload["cursor"] = _inside(session, cursor)
-    elif what == "range":
-        payload["range"] = (
-            _inside(session, result.get("range") or {})
-            if result.get("range")
-            else {"open": False, "file": params.get("file")}
+    if request.what == "marks":
+        marks = [Mark.model_validate(mark) for mark in pending(session)]
+        return ReadResult(**envelope, marks=marks)
+    if request.what == "cursor":
+        state = result.get("cursor") or {}
+        cursor = (
+            Cursor.model_validate(state) if _within(session, state) else _outside(state)
         )
-    elif what == "tabs":
-        payload["buffers"] = [
-            state
-            for state in result.get("buffers") or []
-            if _within(session, state.get("file"))
-        ]
-    return _envelope(session, attached=attached, **payload)
+        return ReadResult(**envelope, cursor=cursor)
+    if request.what == "range":
+        state = result.get("range")
+        if not state:
+            return ReadResult(**envelope, range=NotOpen(open=False, file=request.file))
+        span = (
+            Range.model_validate(state) if _within(session, state) else _outside(state)
+        )
+        return ReadResult(**envelope, range=span)
+    buffers = [
+        Buffer.model_validate(state)
+        for state in result.get("buffers") or []
+        if _within(session, state)
+    ]
+    return ReadResult(**envelope, buffers=buffers)
 
 
-def _within(session: Session, file: str | None) -> bool:
+def _within(session: Session, state: dict[str, Any]) -> bool:
+    """Whether the agent may be told about this buffer.
+
+    The human can navigate anywhere; the agent may only be told about what is
+    inside the root it was given.
+    """
+    file = state.get("file")
     if not file:
         return False
     try:
@@ -243,15 +189,8 @@ def _within(session: Session, file: str | None) -> bool:
         return False
 
 
-def _inside(session: Session, state: dict[str, Any]) -> dict[str, Any]:
-    """Blank out content the agent may not read.
-
-    The human can navigate anywhere; the agent may only be told about what is
-    inside the root it was given.
-    """
-    if _within(session, state.get("file")):
-        return state
-    return {"refused": "outside the session root", "file": state.get("file")}
+def _outside(state: dict[str, Any]) -> OutsideRoot:
+    return OutsideRoot(file=state.get("file"), refused="outside the session root")
 
 
 def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Server:
@@ -262,18 +201,28 @@ def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Serv
         _ctx: Any, params: types.CallToolRequestParams
     ) -> types.CallToolResult:
         arguments = params.arguments or {}
-        session = lookup(str(arguments.get("session", "")))
+        try:
+            if params.name == "show":
+                request: ShowRequest | ReadRequest = ShowRequest.model_validate(
+                    arguments
+                )
+            elif params.name == "read":
+                request = ReadRequest.model_validate(arguments)
+            else:
+                return _error(f"unknown tool: {params.name}")
+        except ValidationError as e:
+            return _error(models.invalid(e.errors()))
+        session = lookup(request.session)
         if session is None:
             return _error(
                 "no such session. Ask the human to run `nv new <root>` and paste the key it prints."
             )
         try:
-            if params.name == "show":
-                payload = await _show(session, arguments)
-            elif params.name == "read":
-                payload = await _read(session, arguments)
+            payload: Envelope
+            if isinstance(request, ShowRequest):
+                payload = await _show(session, request)
             else:
-                return _error(f"unknown tool: {params.name}")
+                payload = await _read(session, request)
         except Refused as e:
             return _error(str(e))
         except Exception as e:
@@ -281,9 +230,10 @@ def build(lookup: SessionLookup, save: Callable[[], None] | None = None) -> Serv
             return _error(str(e))
         if save is not None:
             save()
+        document = payload.model_dump(exclude_none=True)
         return types.CallToolResult(
-            content=[types.TextContent(type="text", text=json.dumps(payload))],
-            structured_content=payload,
+            content=[types.TextContent(type="text", text=json.dumps(document))],
+            structured_content=document,
         )
 
     return Server("nvim", on_list_tools=on_list_tools, on_call_tool=on_call_tool)

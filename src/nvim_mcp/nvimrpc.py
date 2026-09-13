@@ -106,7 +106,7 @@ class NvimRPC:
         `nvim_cmd`'s structured arguments, so a filename the agent controls
         would run a shell.
         """
-        return await self.request("nvim_exec_lua", code, list(args))
+        return await self.request("nvim_exec_lua", code, [lua_value(a) for a in args])
 
     async def close(self) -> None:
         self._closed = True
@@ -146,3 +146,17 @@ class NvimRPC:
                 future.set_result(result)
         elif kind == NOTIFICATION and self.on_notification:
             self.on_notification(message[1], message[2])
+
+
+def lua_value(value: Any) -> Any:
+    """Prepare a Python value for a Lua argument.
+
+    An absent optional field is left out rather than sent as null: nvim decodes
+    msgpack NIL as vim.NIL, which is truthy in Lua, so a default written as
+    `opts.x or 1` would never apply.
+    """
+    if isinstance(value, dict):
+        return {k: lua_value(v) for k, v in value.items() if v is not None}
+    if isinstance(value, list | tuple):
+        return [lua_value(v) for v in value]
+    return value
