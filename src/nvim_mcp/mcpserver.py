@@ -302,7 +302,9 @@ def build(
                 "no such session. Ask the human to run `nv new <root>` and "
                 "paste the key it prints."
                 if key
-                else "no session: pass `session`, or start this client with `nv box`."
+                else "no session for this client. It was started somewhere "
+                "without one -- ask the human to run `nv new <root>` in the "
+                "directory they want you looking at, and paste the key."
             )
         try:
             payload: Envelope

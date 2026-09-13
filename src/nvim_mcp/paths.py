@@ -63,15 +63,24 @@ def box_dir() -> Path:
     return Path(base) / "nvim-mcp-box"
 
 
+def sandboxed() -> bool:
+    """Whether this client is behind a sandbox mount rather than on the host.
+
+    The agent directory is bind-mounted read-only into a box, which is the
+    same property that stops a broker starting in there. A client that can
+    write it can also reach the admin socket and everything else this user
+    owns, so there is nothing a sandbox is keeping from it.
+    """
+    return not os.access(agent_dir(), os.W_OK)
+
+
 def box_key() -> str | None:
     """Return the session key a launcher left for this client, if any.
 
-    Only a sandboxed client takes one. The test is whether the agent directory
-    is writable, which is the same property that stops a broker from starting
-    inside a box: on the host the directory holds an entry per live box, none
-    of which belongs to the client asking.
+    Only a sandboxed client takes one: on the host the directory holds an
+    entry per live box, none of which belongs to the client asking.
     """
-    if os.access(agent_dir(), os.W_OK):
+    if not sandboxed():
         return None
     keys = sorted(box_dir().glob("*/key"))
     if len(keys) != 1:

@@ -118,7 +118,7 @@ async def test_a_client_with_no_key_is_told_what_to_do(
     wire = await Wire.connect(paths.agent_socket())
     result = await wire.call("show", {"locations": [{"file": "src/main.c"}]})
     assert result.get("isError") is True
-    assert "nv box" in result["content"][0]["text"]
+    assert "nv new" in result["content"][0]["text"]
     await wire.close()
 
 

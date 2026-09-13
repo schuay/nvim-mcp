@@ -7,13 +7,16 @@ them at the line; the human marks a range in the editor and asks about it.
 ```sh
 uv tool install nvim-mcp
 nv install claude    # or codex, gemini, opencode -- shows the change and asks
-
-nv new ~/src/v8      # create a session, print its key and attach command
-nv 3                 # attach a terminal to session 3
 ```
 
-`nv install` writes one entry into that harness's own config file, keeping a
-copy of what was there, and says what to do next. It needs nvim on PATH.
+Then ask your agent to show you something. It takes a session for the
+directory it was started in, nvim starts with the first thing it shows, and a
+window opens for it if `NVIM_MCP_TERMINAL` names your terminal. There is
+nothing to start and no key to paste.
+
+`nv new <root>` still makes a session by hand, `nv ls` lists them, and `nv 3`
+attaches a terminal to one. A sandboxed agent cannot reach that side at all,
+so its launcher passes it a key instead; see below.
 
 The agent reaches the same session through MCP and puts code in front of you
 instead of quoting line numbers at you.

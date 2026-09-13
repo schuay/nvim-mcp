@@ -244,11 +244,49 @@ def cmd_mcp(_args: argparse.Namespace) -> int:
     starts one and the new broker adopts the sessions. A sandboxed client runs
     the same command with the agent directory mounted read-only, where the
     broker started here cannot claim the socket, so the one already serving it
-    on the host stays the only one.
+    on the host stays the only one -- and cannot ask for a broker at all,
+    which is why it is not offered the chance to wait for one.
     """
+    sandboxed = paths.sandboxed()
+    key = paths.box_key() if sandboxed else _session_here()
     return splice.splice(
-        str(paths.agent_socket()), revive=_revive_broker, key=paths.box_key()
+        str(paths.agent_socket()),
+        revive=None if sandboxed else _revive_broker,
+        key=key,
     )
+
+
+def _session_here() -> str | None:
+    """Take the session rooted where this client was started, making one if
+    there is none.
+
+    This is what makes the tools work on their own: nothing to create by hand
+    and no key to paste. Only a client on the host can do it, because it goes
+    through the admin socket, which lives in the runtime directory that no
+    sandbox mounts -- the same split that keeps session administration off the
+    surface a box can reach. The session is recorded without starting nvim, so
+    an agent that never shows anything costs nothing.
+    """
+    try:
+        _ensure_broker()
+        reply = _ask(
+            {
+                "cmd": "ensure",
+                "root": str(Path.cwd()),
+                "env": session_env(),
+                "spawn": False,
+            }
+        )
+    except (OSError, RuntimeError, SystemExit):
+        # No broker and no way to start one. The client still comes up, and
+        # says what it cannot do when a tool is called.
+        return None
+    if not reply.get("ok"):
+        # A root the human would not have chosen, most likely. Nothing is
+        # refused outright: they can still name a session by hand.
+        print(f"nvim-mcp: {reply.get('error')}", file=sys.stderr)
+        return None
+    return str(reply["key"])
 
 
 def _revive_broker() -> None:
@@ -337,23 +375,19 @@ def _offer_terminal(assume_yes: bool) -> None:
 GREETING = """
 nvim-mcp is set up for {harness}. Restart it so it picks the server up.
 
-  Your agent gets two tools: `show` puts code and its notes in front of you,
-  `read` collects what you are looking at and the questions you hand over.
+  Then just ask it to show you something. It gets a session for whatever
+  directory you started it in, nvim starts with the first thing it shows,
+  and a window opens for it. Nothing to start, nothing to paste.
 
-  In a project directory:
-    nv new .        start a session there and print its key
-    nv ls           what is running, and the key for each
-    nv 1            attach this terminal to session 1
+  Your side, in that window:
+    :Ask why this?   hand the line and your question back to the agent
+    :3,5Ask ...      hand a range
+    :Ref             copy a reference to the line, to paste into the chat
+    :AgentPop        drop the top frame of notes
+    :q               safe -- the session comes back with the notes where
+                     your edits left them
 
-  In the editor:
-    :Ask why this?  hand the line and your question to the agent
-    :3,5Ask ...     hand a range
-    :Ref            copy a reference to the line, to paste back in chat
-    :AgentPop       drop the top frame of notes
-    :q              safe; the session comes back with the notes where your
-                    edits left them
-
-  Give the agent the key `nv new` printed and ask it to show you something.
+  `nv ls` lists what is running, if you ever want to look.
 """
 
 

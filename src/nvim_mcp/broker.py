@@ -132,6 +132,7 @@ class Broker:
         clean: bool = False,
         background: str | None = None,
         env: dict[str, str] | None = None,
+        spawn: bool = True,
     ) -> tuple[Session, bool]:
         """Return the session already rooted here, or make one.
 
@@ -146,7 +147,7 @@ class Broker:
                 if str(session.root.path) == root:
                     return session, False
             _guard_root(Path(root))
-            return await self._create(root, clean, background, env), True
+            return await self._create(root, clean, background, env, spawn), True
 
     async def _create(
         self,
@@ -154,11 +155,14 @@ class Broker:
         clean: bool,
         background: str | None,
         env: dict[str, str] | None,
+        spawn: bool = True,
     ) -> Session:
         sid = self._next_id()
         session = Session.create(sid, root, clean=clean, background=background, env=env)
         session.on_change = self.save
-        await session.ensure()
+        # Without `spawn` the session is only recorded: an agent that never
+        # shows anything should not cost the human an editor process.
+        await session.ensure(spawn)
         self.sessions[sid] = session
         self.save()
         return session
@@ -256,6 +260,7 @@ async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
         bool(request.get("clean")),
         request.get("background"),
         request.get("env"),
+        spawn=bool(request.get("spawn", True)),
     )
     return {
         "id": session.sid,

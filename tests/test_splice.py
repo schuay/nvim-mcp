@@ -274,12 +274,21 @@ def test_a_client_that_cannot_start_a_broker_gives_up_on_a_socket_nobody_serves(
         assert not client.connect(first=True)
 
 
-def test_the_host_splice_revives_the_broker(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_a_host_client_takes_the_session_rooted_where_it_started(
+    runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     import argparse
 
     from nvim_mcp import cli
 
+    asked: dict[str, Any] = {}
     captured: dict[str, Any] = {}
+    monkeypatch.setattr(cli, "_ensure_broker", lambda: None)
+    monkeypatch.setattr(
+        cli,
+        "_ask",
+        lambda request, timeout=0: asked.update(request) or {"ok": True, "key": "k-1"},
+    )
     monkeypatch.setattr(
         cli.splice,
         "splice",
@@ -288,25 +297,49 @@ def test_the_host_splice_revives_the_broker(monkeypatch: pytest.MonkeyPatch) -> 
         ),
     )
     cli.cmd_mcp(argparse.Namespace())
+
+    # Nothing for the human to create and no key to paste: the client asks for
+    # the session rooted where it was started, over the admin socket that only
+    # a host client can reach.
+    assert (asked["cmd"], asked["root"]) == ("ensure", str(Path.cwd()))
+    # And without an editor, which starts with the first thing an agent shows.
+    assert asked["spawn"] is False
+    assert captured["key"] == "k-1"
     assert captured["revive"] is cli._revive_broker
-    # No launcher left a key on the host, where the agent directory is
-    # writable, so the client keeps naming a session per call.
-    assert captured["key"] is None
 
 
-def test_serving_mcp_starts_no_broker_before_trying_the_socket(
-    monkeypatch: pytest.MonkeyPatch,
+def test_a_sandboxed_client_asks_for_no_broker_and_no_session(
+    runtime: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A client in a sandbox runs this too, and the broker it would start there
-    cannot serve the agent socket it was handed."""
+    """A box cannot serve the agent socket it was handed, and cannot reach the
+    admin socket at all: starting a broker there wasted fifteen seconds and
+    then failed."""
     import argparse
 
     from nvim_mcp import cli
 
+    # Read-only is what a box has, and what this asks about.
+    paths.agent_dir().chmod(0o500)
     started: list[None] = []
+    captured: dict[str, Any] = {}
     monkeypatch.setattr(cli, "_ensure_broker", lambda: started.append(None))
-    monkeypatch.setattr(cli.splice, "splice", lambda path, revive=None, key=None: 0)
-
-    cli.cmd_mcp(argparse.Namespace())
+    monkeypatch.setattr(
+        cli,
+        "_ask",
+        lambda request, timeout=0: started.append(None) or {"ok": False},
+    )
+    monkeypatch.setattr(
+        cli.splice,
+        "splice",
+        lambda path, revive=None, key=None: (
+            captured.update(revive=revive, key=key) or 0
+        ),
+    )
+    try:
+        cli.cmd_mcp(argparse.Namespace())
+    finally:
+        paths.agent_dir().chmod(0o700)
 
     assert started == []
+    assert captured["revive"] is None
+    assert captured["key"] is None
