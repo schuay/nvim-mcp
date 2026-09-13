@@ -167,6 +167,16 @@ local function fold(text, width, prefix)
 end
 
 
+-- A quickfix entry gets one screen line, which nvim neither wraps nor marks as
+-- cut, so a long note would run off the right edge. Clip it to what the entry
+-- leaves after nvim's own 'file|line col n note| ' prefix; the band above the
+-- code carries the whole text.
+local function clip(text, room)
+  if #text <= room then return text end
+  return (text:sub(1, math.max(1, room - 3)):gsub('%s+$', '')) .. '...'
+end
+
+
 local function loaded_buffers()
   local out = {}
   for _, buf in ipairs(vim.api.nvim_list_bufs()) do
@@ -366,12 +376,18 @@ function M.show(new_frames, show_opts)
       end
     end
     if vim.api.nvim_buf_is_loaded(buf) then
+      local lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf)))
+      local label = note.id .. '  '
+      -- nvim draws 'name|lnum col 1 note| ' ahead of the entry's own text:
+      -- the displayed name and the line, plus 14 fixed columns for the rest.
+      local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':.')
+      local room = vim.o.columns - #name - #tostring(lnum) - 14 - #label
       items[#items + 1] = {
         bufnr = buf,
-        lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf))),
+        lnum = lnum,
         col = 1,
         type = 'N',
-        text = note.id .. '  ' .. (note.text or ''),
+        text = label .. clip(note.text or '', math.max(20, room)),
       }
     end
   end

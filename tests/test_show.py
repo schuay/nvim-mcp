@@ -164,3 +164,66 @@ async def test_a_range_past_the_end_of_the_file_still_highlights(
     )
     await nvim.close()
     await wire.close()
+
+
+async def test_a_long_note_folds_to_the_window_width(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    # Prose as an agent writes it: hard-wrapped, and longer than one screen
+    # line. The note keeps its words and the editor decides where they break.
+    paragraph = "\n".join([" ".join(["word"] * 8)] * 40)
+    await show(
+        wire, session["key"], locations=[{"file": "src/main.c", "text": paragraph}]
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    state = await nvim.lua("""
+        local buf = vim.fn.bufnr('src/main.c')
+        local out = {}
+        for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+            buf, vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1,
+            { details = true })) do
+          for _, line in ipairs(mark[4].virt_lines or {}) do
+            out[#out + 1] = line[1][1]
+          end
+        end
+        return { lines = out, columns = vim.o.columns }
+    """)
+    lines = state["lines"]
+    assert len(lines) > 1, lines
+    assert max(len(line) for line in lines) <= state["columns"]
+    assert lines[0].startswith("  A1  word")
+    # Every word survives the fold, none run together across a source newline.
+    assert " ".join(lines).split() == ["A1"] + ["word"] * 320
+    await nvim.close()
+    await wire.close()
+
+
+async def test_a_long_note_is_clipped_in_the_quickfix_list(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    await show(
+        wire,
+        session["key"],
+        locations=[{"file": "src/main.c", "line": 3, "text": "word " * 300}],
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    state = await nvim.lua("""
+        vim.cmd('copen')
+        local line = vim.api.nvim_buf_get_lines(0, 0, 1, true)[1]
+        vim.cmd('cclose')
+        return { line = line, columns = vim.o.columns }
+    """)
+    line = state["line"]
+    # nvim draws 'src/main.c|3 col 1 note| ' ahead of the entry's own text, and
+    # the whole row has to fit the screen line it gets.
+    assert line.startswith("src/main.c|3 col 1 note| A1  word")
+    assert len(line) <= state["columns"]
+    assert line.endswith("...")
+    await nvim.close()
+    await wire.close()

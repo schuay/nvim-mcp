@@ -105,6 +105,8 @@ def test_a_long_note_is_truncated() -> None:
     assert one_line("x" * (NOTE_LIMIT * 2)).endswith("...")
     assert len(one_line("x" * (NOTE_LIMIT * 2))) == NOTE_LIMIT
     assert one_line("short\x07 note") == "short note"
+    # A dropped newline would have run the two words together.
+    assert one_line("wrapped\nprose\tand  spaces") == "wrapped prose and spaces"
 
 
 def test_a_loose_directory_is_tightened(monkeypatch: pytest.MonkeyPatch) -> None:

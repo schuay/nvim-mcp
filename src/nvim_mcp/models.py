@@ -46,7 +46,10 @@ class LocationSpec(Request):
     )
     text: str = Field(
         default="",
-        description="One-line note, shown above the line and in the quickfix list",
+        description=(
+            "Note shown above the line and in the quickfix list. Folded to the "
+            "window width, so write prose, not pre-wrapped lines."
+        ),
     )
 
 

@@ -34,9 +34,10 @@ from .lifecycle import Editor
 from .nvimrpc import NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
 
-#: A note is a label, not a document. Longer than this and it buries the code
-#: it points at, however the editor folds it.
-NOTE_LIMIT = 400
+#: A note may explain itself, but it still has to leave the code visible. At 80
+#: columns a folded line carries about 65 characters, so this is roughly three
+#: quarters of a 40-row terminal for a single note.
+NOTE_LIMIT = 2000
 
 #: Bytes of buffer text a mark carries. A question is about a passage, and an
 #: agent that needs more can read the file.
@@ -52,12 +53,16 @@ SYNC = "return NvimMcp.sync()"
 
 
 def one_line(text: str) -> str:
-    """Reduce a label to printable characters within the length limit.
+    """Reduce a note to printable characters within the length limit.
 
     virt_lines accepts newlines and escape sequences without complaint, and the
-    label is rendered in the human's terminal.
+    note is rendered in the human's terminal. Newlines and tabs become spaces
+    rather than vanishing, which would run the words on either side together;
+    the Lua half folds the result to the window width.
     """
-    printable = "".join(ch for ch in text if ch.isprintable()).strip()
+    printable = " ".join(
+        "".join(ch if ch.isprintable() else " " for ch in text).split()
+    )
     if len(printable) <= NOTE_LIMIT:
         return printable
     return printable[: NOTE_LIMIT - 3] + "..."
