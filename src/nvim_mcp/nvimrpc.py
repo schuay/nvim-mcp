@@ -26,6 +26,10 @@ REQUEST = 0
 RESPONSE = 1
 NOTIFICATION = 2
 
+#: A wedged nvim must not wedge the client waiting on it. Generous, because a
+#: cold buffer load on a large file is legitimately slow.
+TIMEOUT = 30.0
+
 
 class NvimError(RuntimeError):
     """An error returned by nvim for a request."""
@@ -39,6 +43,7 @@ class NvimRPC:
         self._writer = writer
         self._ids = count(1)
         self._pending: dict[int, asyncio.Future[Any]] = {}
+        self._closed = False
         self._task = asyncio.create_task(self._read_loop())
         self.on_notification: Callable[[str, list[Any]], None] | None = None
 
@@ -47,13 +52,21 @@ class NvimRPC:
         reader, writer = await asyncio.open_unix_connection(str(socket))
         return cls(reader, writer)
 
-    async def request(self, method: str, *params: Any) -> Any:
+    async def request(self, method: str, *params: Any, timeout: float = TIMEOUT) -> Any:
+        # Once the read loop is gone nothing will ever complete a new future, so
+        # a request registered after that would wait forever.
+        if self._closed:
+            raise NvimError("nvim connection is closed")
         msgid = next(self._ids)
         future: asyncio.Future[Any] = asyncio.get_running_loop().create_future()
         self._pending[msgid] = future
         self._writer.write(msgpack.packb([REQUEST, msgid, method, list(params)]))
         await self._writer.drain()
-        return await future
+        try:
+            return await asyncio.wait_for(future, timeout)
+        except TimeoutError:
+            self._pending.pop(msgid, None)
+            raise NvimError(f"nvim did not answer {method} within {timeout}s") from None
 
     async def notify(self, method: str, *params: Any) -> None:
         """Send a call that expects no answer.
@@ -75,6 +88,7 @@ class NvimRPC:
         return await self.request("nvim_exec_lua", code, list(args))
 
     async def close(self) -> None:
+        self._closed = True
         self._task.cancel()
         self._writer.close()
         with contextlib.suppress(OSError):
@@ -92,6 +106,7 @@ class NvimRPC:
         except Exception:
             log.exception("nvim connection failed")
         finally:
+            self._closed = True
             for future in self._pending.values():
                 if not future.done():
                     future.set_exception(NvimError("nvim connection closed"))

@@ -13,11 +13,25 @@ a sandbox hands out the host.
 from __future__ import annotations
 
 import os
+import stat
 from pathlib import Path
 
 
 def _mkdir(path: Path) -> Path:
+    """Create a private directory, tightening one left by an older version.
+
+    ``mkdir`` applies its mode only when it creates the directory, so a
+    directory already there keeps whatever permissions it has. These hold a
+    socket that talks to the human's editor.
+    """
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
+    info = path.lstat()
+    if stat.S_ISLNK(info.st_mode) or not stat.S_ISDIR(info.st_mode):
+        raise RuntimeError(f"not a directory: {path}")
+    if info.st_uid != os.getuid():
+        raise PermissionError(f"directory is not owned by this user: {path}")
+    if info.st_mode & 0o077:
+        path.chmod(0o700)
     return path
 
 

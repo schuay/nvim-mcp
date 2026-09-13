@@ -16,6 +16,7 @@ import contextlib
 import fcntl
 import json
 import logging
+import secrets
 import shutil
 from pathlib import Path
 from typing import Any
@@ -33,15 +34,19 @@ IDLE_EXIT_SECONDS = 15 * 60
 class Broker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
-        self.clients = 0
         #: Live client connections. Closing a listener waits for these, so
         #: shutdown has to end them itself or a connected client pins the broker.
         self.connections: set[asyncio.Task[None]] = set()
 
+    @property
+    def clients(self) -> int:
+        return len(self.connections)
+
     def session_by_key(self, key: str) -> Session | None:
         for session in self.sessions.values():
-            # Compare the whole key: the short id alone is guessable.
-            if key and key == session.key:
+            # The whole key, compared without an early exit: the short id alone
+            # is guessable, and the secret authorizes.
+            if key and secrets.compare_digest(key, session.key):
                 return session
         return None
 
@@ -137,7 +142,6 @@ async def _agent_client(
     broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
     task = asyncio.current_task()
-    broker.clients += 1
     if task is not None:
         broker.connections.add(task)
     server = mcpserver.build(broker.session_by_key)
@@ -148,7 +152,6 @@ async def _agent_client(
     except Exception:
         log.exception("agent connection failed")
     finally:
-        broker.clients -= 1
         broker.connections.discard(task)
         writer.close()
 

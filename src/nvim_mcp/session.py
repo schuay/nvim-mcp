@@ -166,6 +166,37 @@ local function displayed(buf)
   return false
 end
 
+-- Virtual lines ignore 'wrap' and this nvim offers no wrapping overflow mode,
+-- so a long note is cut off at the window edge with nothing to show it
+-- continued. Fold it here instead, against the width of a window showing the
+-- buffer. The width is taken once, so resizing the terminal does not re-fold.
+local function textwidth(buf)
+  for _, win in ipairs(vim.api.nvim_list_wins()) do
+    if vim.api.nvim_win_get_buf(win) == buf then
+      local info = vim.fn.getwininfo(win)[1]
+      return math.max(40, info.width - info.textoff - 4)
+    end
+  end
+  return math.max(40, vim.o.columns - 4)
+end
+
+local function fold(text, width)
+  local lines, line, indent = {}, '', '  '
+  for word in text:gmatch('%S+') do
+    if line == '' then
+      line = indent .. word
+    elseif #line + 1 + #word <= width then
+      line = line .. ' ' .. word
+    else
+      lines[#lines + 1] = line
+      indent = '     '
+      line = indent .. word
+    end
+  end
+  if line ~= '' then lines[#lines + 1] = line end
+  return lines
+end
+
 local function scratch(win)
   local buf = vim.api.nvim_win_get_buf(win)
   return vim.api.nvim_buf_get_name(buf) == ''
@@ -174,8 +205,17 @@ local function scratch(win)
     and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == ''
 end
 
-local items, opened, seen = {}, {}, {}
+local items, opened, seen, moved = {}, {}, {}, {}
 for _, loc in ipairs(locs) do
+  -- The path was resolved before this call. Resolve it again here, because the
+  -- agent holds the root read-write and could have pointed a component
+  -- somewhere else in between. This narrows that window; it does not close it,
+  -- since nvim opens by name and not by descriptor.
+  local real = vim.uv.fs_realpath(loc.file)
+  if real ~= opts.root and (real == nil or real:sub(1, #opts.root + 1) ~= opts.root .. '/') then
+    moved[#moved + 1] = loc.file
+    goto continue
+  end
   -- bufadd takes the name literally. :edit and nvim_cmd would expand backticks
   -- in it and run a shell.
   local buf = vim.fn.bufadd(loc.file)
@@ -206,16 +246,21 @@ for _, loc in ipairs(locs) do
       end_row = end_row, end_col = end_col, hl_group = 'NvimMcpShow', hl_eol = true,
     })
   end
-  -- The label goes above the code as a virtual line: not buffer text, so the
+  -- The label goes above the code as virtual lines: not buffer text, so the
   -- file is untouched and the human cannot edit or yank it by accident.
   if loc.text ~= '' then
-    vim.api.nvim_buf_set_extmark(buf, ns, first - 1, 0, {
+    local lines = {}
+    for _, text in ipairs(fold(loc.text, textwidth(buf))) do
       -- An empty final chunk extends the highlight to the end of the screen
       -- line, so the note reads as a band rather than a run of coloured text.
-      virt_lines = { { { '  ' .. loc.text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } } },
+      lines[#lines + 1] = { { text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } }
+    end
+    vim.api.nvim_buf_set_extmark(buf, ns, first - 1, 0, {
+      virt_lines = lines,
       virt_lines_above = true,
     })
   end
+  ::continue::
 end
 
 vim.fn.setqflist(items, 'r')
@@ -225,22 +270,32 @@ if opts.focus then
 else
   vim.api.nvim_set_current_tabpage(previous)
 end
-return { opened = opened, uis = #vim.api.nvim_list_uis() }
+return { opened = opened, moved = moved, uis = #vim.api.nvim_list_uis() }
 """
 
 
+#: A note is a label, not a document. Longer than this and it buries the code
+#: it points at, however the editor folds it.
+NOTE_LIMIT = 400
+
+
 def one_line(text: str) -> str:
-    """Drop control characters from a label.
+    """Reduce a label to printable characters within the length limit.
 
     virt_lines accepts newlines and escape sequences without complaint, and the
     label is rendered in the human's terminal.
     """
-    return "".join(ch for ch in text if ch.isprintable()).strip()
+    printable = "".join(ch for ch in text if ch.isprintable()).strip()
+    if len(printable) <= NOTE_LIMIT:
+        return printable
+    return printable[: NOTE_LIMIT - 3] + "..."
 
 
 @dataclass
 class Location:
-    file: str
+    #: Already resolved against the session root. Resolving once keeps the
+    #: window between the check and nvim's open as small as it can be here.
+    file: Path
     line: int = 1
     end_line: int | None = None
     text: str = ""
@@ -304,6 +359,10 @@ class Session:
         while asyncio.get_running_loop().time() < deadline:
             if self.socket.exists():
                 return
+            # A configuration error kills nvim in milliseconds. Without this the
+            # failure is reported as a timeout, naming the wrong cause.
+            if self.process is not None and self.process.returncode is not None:
+                raise RuntimeError(f"nvim exited with status {self.process.returncode}")
             await asyncio.sleep(0.02)
         raise RuntimeError(f"nvim did not listen on {self.socket} within {timeout}s")
 
@@ -315,7 +374,7 @@ class Session:
         # NIL as vim.NIL, which is truthy in Lua.
         payload = [
             {
-                "file": str(self.root.resolve(loc.file)),
+                "file": str(loc.file),
                 "line": loc.line,
                 "text": one_line(loc.text),
             }
@@ -325,7 +384,9 @@ class Session:
         # Agent edits reach disk without passing through the broker, so refresh
         # before showing anything.
         await self.rpc.request("nvim_command", "checktime")
-        return await self.rpc.lua(SHOW, payload, {"title": title, "focus": focus})
+        return await self.rpc.lua(
+            SHOW, payload, {"title": title, "focus": focus, "root": str(self.root.path)}
+        )
 
     async def attached(self) -> bool:
         assert self.rpc is not None

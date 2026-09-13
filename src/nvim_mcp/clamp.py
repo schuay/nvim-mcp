@@ -24,7 +24,10 @@ class Root:
 
     @classmethod
     def of(cls, raw: str | Path) -> Root:
-        resolved = Path(raw).expanduser().resolve()
+        try:
+            resolved = Path(raw).expanduser().resolve()
+        except OSError as e:
+            raise Refused(f"cannot resolve root {raw}: {e}") from e
         if not resolved.is_dir():
             raise Refused(f"root is not a directory: {resolved}")
         return cls(resolved)
@@ -38,9 +41,18 @@ class Root:
         candidate = Path(raw)
         if not candidate.is_absolute():
             candidate = self.path / candidate
-        resolved = candidate.resolve()
+        try:
+            resolved = candidate.resolve()
+            regular = resolved.is_file()
+        except OSError as e:
+            # A symlink loop or an unreadable component refuses this one path
+            # rather than failing the whole call.
+            raise Refused(f"cannot resolve: {e.strerror or e}") from e
         if resolved != self.path and self.path not in resolved.parents:
             raise Refused("outside the session root")
-        if not resolved.is_file():
+        if not regular:
             raise Refused("not a regular file")
         return resolved
+
+    def contains(self, resolved: Path) -> bool:
+        return resolved == self.path or self.path in resolved.parents

@@ -17,6 +17,16 @@ import socket
 import sys
 
 
+def write_all(fd: int, data: bytes) -> None:
+    """Write every byte.
+
+    os.write may write fewer bytes than it was given, and a short write here
+    truncates an MCP message mid-JSON.
+    """
+    while data:
+        data = data[os.write(fd, data) :]
+
+
 def splice(socket_path: str) -> int:
     sock = socket.socket(socket.AF_UNIX)
     try:
@@ -48,7 +58,7 @@ def splice(socket_path: str) -> int:
                     chunk = sock.recv(65536)
                     if not chunk:
                         return 0
-                    os.write(sys.stdout.buffer.fileno(), chunk)
+                    write_all(sys.stdout.buffer.fileno(), chunk)
     except (BrokenPipeError, ConnectionResetError):
         return 0
     finally:

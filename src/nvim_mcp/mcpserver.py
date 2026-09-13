@@ -26,6 +26,10 @@ from .session import Location, Session
 
 log = logging.getLogger(__name__)
 
+#: A review the human has to walk, not a dump. Beyond this the quickfix list
+#: stops being something anyone reads to the end.
+LOCATION_LIMIT = 50
+
 LOCATION_SCHEMA = {
     "type": "object",
     "properties": {
@@ -59,7 +63,12 @@ SHOW_TOOL = types.Tool(
     input_schema={
         "type": "object",
         "properties": {
-            "locations": {"type": "array", "items": LOCATION_SCHEMA, "minItems": 1},
+            "locations": {
+                "type": "array",
+                "items": LOCATION_SCHEMA,
+                "minItems": 1,
+                "maxItems": LOCATION_LIMIT,
+            },
             "title": {"type": "string", "description": "Label for the quickfix list"},
             "focus": {
                 "type": "boolean",
@@ -92,9 +101,12 @@ SessionLookup = Callable[[str], Session | None]
 
 async def _show(session: Session, params: dict[str, Any]) -> dict[str, Any]:
     locations, refused = [], []
-    for raw in params["locations"]:
+    requested = params["locations"]
+    for raw in requested[:LOCATION_LIMIT]:
         try:
-            session.root.resolve(raw["file"])
+            # Resolve once. The path that goes to nvim is the one that passed
+            # the clamp, so there is no second resolution to disagree with it.
+            resolved = session.root.resolve(raw["file"])
         except Refused as e:
             # One bad path does not spoil the rest of a review.
             session.refusals += 1
@@ -102,25 +114,35 @@ async def _show(session: Session, params: dict[str, Any]) -> dict[str, Any]:
             continue
         locations.append(
             Location(
-                file=raw["file"],
+                file=resolved,
                 line=raw.get("line", 1),
                 end_line=raw.get("end_line"),
                 text=raw.get("text", ""),
             )
         )
+    for raw in requested[LOCATION_LIMIT:]:
+        refused.append(
+            {"file": raw["file"], "reason": f"over the {LOCATION_LIMIT} location limit"}
+        )
 
     opened: list[str] = []
+    attached = await session.attached()
     if locations:
         result = await session.show(
             locations,
             title=params.get("title", "agent"),
-            focus=params.get("focus", False),
+            focus=params.get("focus", True),
         )
         opened = result.get("opened", [])
+        # nvim reports how many UIs it has while it is applying the show, which
+        # saves a second round trip for the same fact.
+        attached = bool(result.get("uis"))
+        for path in result.get("moved", []):
+            refused.append({"file": path, "reason": "path changed while opening"})
 
     return {
         "session": session.sid,
-        "attached": await session.attached(),
+        "attached": attached,
         "attach_cmd": f"nv {session.sid}",
         "marks_pending": 0,
         "opened": opened,
