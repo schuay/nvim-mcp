@@ -1,0 +1,90 @@
+# Copyright 2026 The nvim-mcp developers
+# SPDX-License-Identifier: MIT
+
+[project]
+name = "nvim-mcp"
+version = "0.1.0"
+description = "Shared editor surface between a coding agent and the human reviewing its work"
+readme = "README.md"
+requires-python = ">=3.12"
+license = "MIT"
+authors = [{ name = "Jakob Linke" }]
+keywords = ["neovim", "mcp", "code-review", "agent"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    # The broker speaks msgpack-RPC to nvim and MCP to its clients.
+    "msgpack>=1.0",
+    "mcp>=1.2",
+]
+
+[project.scripts]
+nv = "nvim_mcp.cli:main"
+
+[project.urls]
+Repository = "https://github.com/schuay/nvim-mcp"
+
+[dependency-groups]
+dev = ["pytest>=8", "pytest-asyncio>=1.0", "ruff>=0.15"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/nvim_mcp"]
+
+# Keep lint policy in one place and allow new Ruff releases to surface findings.
+[tool.ruff.lint]
+extend-select = [
+    "B",      # bugbear correctness checks
+    "BLE",    # blind except -- see the ignore below
+    "C4",     # comprehension misuse
+    "DTZ",    # naive datetimes
+    "G",      # logging call shape
+    "ISC",    # implicit string concat, i.e. the missing-comma bug
+    "PL",     # pylint subset
+    "RET",    # return-path smells
+    "RUF",
+    "S",      # bandit subset
+    "SIM",
+    "TRY",    # exception antipatterns
+    "UP",     # pyupgrade
+]
+ignore = [
+    # Boundary callbacks and best-effort cleanup must contain undocumented
+    # library exceptions. S110 still rejects silent handlers.
+    "BLE001",
+    # Asserts in tests are the point.
+    "S101",
+    # Inline exception messages stay beside their conditions.
+    "TRY003",
+    # Assertion literals state expected values directly.
+    "PLR2004",
+    # Complexity refactors need separate review instead of inline suppressions.
+    "PLR0913",
+    "PLR0912",
+    "PLR0915",
+    # Local imports keep the splice client free of package imports.
+    "PLC0415",
+]
+
+[tool.ruff.lint.per-file-ignores]
+"**/tests/**" = [
+    "S108",  # /tmp paths in tests are the test's own scratch
+    "S603",  # subprocess in a test harness, with fixed argv
+    "S607",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+addopts = "-m 'not nvim'"
+markers = [
+    "nvim: drives a real nvim process installed on the host",
+]

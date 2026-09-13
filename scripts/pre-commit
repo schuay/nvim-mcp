@@ -1,0 +1,18 @@
+#!/usr/bin/env bash
+# Copyright 2026 The nvim-mcp developers
+# SPDX-License-Identifier: MIT
+
+# Check staged files without resolving, installing, or updating anything.
+set -euo pipefail
+
+repo_root=$(git rev-parse --show-toplevel)
+cd "$repo_root"
+
+mapfile -d '' -t staged_py < <(
+  git diff --cached --name-only --diff-filter=ACM -z -- '*.py'
+)
+
+if ((${#staged_py[@]})); then
+  uv run --offline --no-sync ruff format --check -- "${staged_py[@]}"
+  uv run --offline --no-sync ruff check -- "${staged_py[@]}"
+fi

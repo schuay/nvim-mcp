@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+.coverage
+/uv.lock
+
+# Agent instruction files stay local to the checkout.
+/CLAUDE.md
+/GEMINI.md
+/AGENTS.md

@@ -1,0 +1,7 @@
+#!/usr/bin/env bash
+# Copyright 2026 The nvim-mcp developers
+# SPDX-License-Identifier: MIT
+set -euo pipefail
+cd "$(git rev-parse --show-toplevel)"
+git config core.hooksPath .githooks
+echo "hooks installed: core.hooksPath=.githooks"

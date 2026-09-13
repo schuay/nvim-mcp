@@ -1,0 +1,68 @@
+# Copyright 2026 The nvim-mcp developers
+# SPDX-License-Identifier: MIT
+
+"""A minimal MCP client for tests: JSON-RPC lines over the agent socket.
+
+Hand-written rather than driven through the SDK so the tests exercise the bytes
+a real client sends across the socket.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+from pathlib import Path
+from typing import Any
+
+
+class Wire:
+    def __init__(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.reader = reader
+        self.writer = writer
+        self.next_id = 0
+
+    @classmethod
+    async def connect(cls, socket: Path) -> Wire:
+        reader, writer = await asyncio.open_unix_connection(str(socket))
+        wire = cls(reader, writer)
+        await wire.request(
+            "initialize",
+            {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "test", "version": "0"},
+            },
+        )
+        await wire.notify("notifications/initialized")
+        return wire
+
+    async def request(
+        self, method: str, params: dict[str, Any] | None = None
+    ) -> dict[str, Any]:
+        self.next_id += 1
+        body = {
+            "jsonrpc": "2.0",
+            "id": self.next_id,
+            "method": method,
+            "params": params or {},
+        }
+        self.writer.write(json.dumps(body).encode() + b"\n")
+        await self.writer.drain()
+        line = await asyncio.wait_for(self.reader.readline(), 30)
+        reply = json.loads(line)
+        if "error" in reply:
+            raise RuntimeError(reply["error"])
+        return reply["result"]
+
+    async def notify(self, method: str, params: dict[str, Any] | None = None) -> None:
+        body = {"jsonrpc": "2.0", "method": method, "params": params or {}}
+        self.writer.write(json.dumps(body).encode() + b"\n")
+        await self.writer.drain()
+
+    async def call(self, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
+        return await self.request("tools/call", {"name": tool, "arguments": arguments})
+
+    async def close(self) -> None:
+        self.writer.close()
