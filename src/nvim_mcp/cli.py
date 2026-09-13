@@ -12,6 +12,7 @@ everyday one does; the broker that spawns it was started from some other shell.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import shutil
@@ -124,9 +125,18 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(_args: argparse.Namespace) -> int:
-    """Serve MCP on stdio for a client running on the host."""
+    """Serve MCP on stdio for a client running on the host.
+
+    The splice outlives the broker: when the broker is gone at the client's
+    next call, this starts it again, and the new one adopts the sessions.
+    """
     _ensure_broker()
-    return splice.splice(str(paths.agent_socket()))
+    return splice.splice(str(paths.agent_socket()), revive=_revive_broker)
+
+
+def _revive_broker() -> None:
+    with contextlib.suppress(SystemExit):
+        _ensure_broker()
 
 
 def cmd_broker(_args: argparse.Namespace) -> int:
