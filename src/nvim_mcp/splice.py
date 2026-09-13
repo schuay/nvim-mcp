@@ -68,8 +68,9 @@ def _message(line: bytes) -> dict[str, Any] | None:
 class Splice:
     def __init__(self, socket_path: str, revive: Callable[[], None] | None = None):
         self.socket_path = socket_path
-        #: Runs before a reconnect attempt. On the host this starts the
-        #: broker if it is gone; in a sandbox nothing can, so it is None.
+        #: Asked for a broker when nothing answers the socket. On the host this
+        #: starts one; a sandbox either has no way to ask (None) or starts one
+        #: that cannot claim the read-only agent directory.
         self.revive = revive
         self.sock: socket.socket | None = None
         self.from_sock = Lines()
@@ -182,28 +183,45 @@ class Splice:
     def connect(self, first: bool) -> bool:
         """Connect to the broker, and bring a new one up to date.
 
-        Keeps trying for a while: a broker being restarted takes a moment to
-        listen again.
+        A broker already listening is taken as it stands, and one is asked for
+        only when nothing answers. That is what lets a client in a sandbox run
+        this against the host's broker: the socket it was given is served
+        already, so no second broker is ever started behind it.
         """
-        if self.revive is not None and not first:
-            self.revive()
-        deadline = time.monotonic() + (0 if first else RECONNECT_WINDOW)
-        while True:
-            sock = socket.socket(socket.AF_UNIX)
-            try:
-                sock.connect(self.socket_path)
-                break
-            except OSError:
-                sock.close()
-                if time.monotonic() >= deadline:
-                    return False
-                time.sleep(0.1)
+        sock = self._dial(0)
+        if sock is None:
+            if self.revive is not None:
+                self.revive()
+            elif first:
+                # Nothing answers, nothing to ask, and no restart is under way.
+                return False
+            sock = self._dial(RECONNECT_WINDOW)
+        if sock is None:
+            return False
         if self.handshake and not self._replay(sock):
             sock.close()
             return False
         self.sock = sock
         self.selector.register(sock.fileno(), selectors.EVENT_READ, "broker")
         return True
+
+    def _dial(self, window: float) -> socket.socket | None:
+        """Try the socket until it answers or `window` seconds have passed.
+
+        A broker coming up takes a moment to listen.
+        """
+        deadline = time.monotonic() + window
+        while True:
+            sock = socket.socket(socket.AF_UNIX)
+            try:
+                sock.connect(self.socket_path)
+            except OSError:
+                sock.close()
+                if time.monotonic() >= deadline:
+                    return None
+                time.sleep(0.1)
+            else:
+                return sock
 
     def _replay(self, sock: socket.socket) -> bool:
         """Repeat the client's handshake and swallow the broker's answer.

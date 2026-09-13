@@ -125,12 +125,14 @@ def cmd_kill(args: argparse.Namespace) -> int:
 
 
 def cmd_mcp(_args: argparse.Namespace) -> int:
-    """Serve MCP on stdio for a client running on the host.
+    """Serve MCP on stdio, for a client on the host or inside a sandbox.
 
-    The splice outlives the broker: when the broker is gone at the client's
-    next call, this starts it again, and the new one adopts the sessions.
+    The splice outlives the broker: when nothing answers the agent socket, this
+    starts one and the new broker adopts the sessions. A sandboxed client runs
+    the same command with the agent directory mounted read-only, where the
+    broker started here cannot claim the socket, so the one already serving it
+    on the host stays the only one.
     """
-    _ensure_broker()
     return splice.splice(str(paths.agent_socket()), revive=_revive_broker)
 
 

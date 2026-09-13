@@ -6,11 +6,13 @@
 from __future__ import annotations
 
 import asyncio
+import contextlib
 import json
 import os
+import socket
 import sys
 import tempfile
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from pathlib import Path
 from typing import Any
 
@@ -218,13 +220,66 @@ async def test_the_real_broker_can_be_restarted_under_a_client(runtime: Path) ->
         await stop_broker(stop, task)
 
 
+@contextlib.contextmanager
+def connected(client: splice.Splice) -> Iterator[None]:
+    try:
+        yield
+    finally:
+        client.selector.close()
+        if client.sock is not None:
+            client.sock.close()
+
+
+def listen(path: Path) -> socket.socket:
+    listener = socket.socket(socket.AF_UNIX)
+    listener.bind(str(path))
+    listener.listen(1)
+    return listener
+
+
+@pytest.mark.parametrize("first", [True, False])
+def test_a_broker_that_is_already_serving_is_used_and_no_second_one_is_started(
+    tmp_path: Path, first: bool
+) -> None:
+    """What a sandboxed client rests on: the socket it was given is served, so
+    the broker it would otherwise start never is."""
+    path = tmp_path / "agent.sock"
+    started: list[None] = []
+    client = splice.Splice(str(path), revive=lambda: started.append(None))
+
+    with listen(path), connected(client):
+        assert client.connect(first=first)
+
+    assert started == []
+
+
+def test_a_broker_that_is_not_there_is_asked_for(tmp_path: Path) -> None:
+    path = tmp_path / "agent.sock"
+    listeners: list[socket.socket] = []
+    client = splice.Splice(str(path), revive=lambda: listeners.append(listen(path)))
+
+    with connected(client):
+        assert client.connect(first=True)
+
+    assert len(listeners) == 1
+    listeners[0].close()
+
+
+def test_a_client_that_cannot_start_a_broker_gives_up_on_a_socket_nobody_serves(
+    tmp_path: Path,
+) -> None:
+    client = splice.Splice(str(tmp_path / "agent.sock"))
+
+    with connected(client):
+        assert not client.connect(first=True)
+
+
 def test_the_host_splice_revives_the_broker(monkeypatch: pytest.MonkeyPatch) -> None:
     import argparse
 
     from nvim_mcp import cli
 
     captured: dict[str, Any] = {}
-    monkeypatch.setattr(cli, "_ensure_broker", lambda: None)
     monkeypatch.setattr(
         cli.splice,
         "splice",
@@ -232,3 +287,21 @@ def test_the_host_splice_revives_the_broker(monkeypatch: pytest.MonkeyPatch) -> 
     )
     cli.cmd_mcp(argparse.Namespace())
     assert captured["revive"] is cli._revive_broker
+
+
+def test_serving_mcp_starts_no_broker_before_trying_the_socket(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A client in a sandbox runs this too, and the broker it would start there
+    cannot serve the agent socket it was handed."""
+    import argparse
+
+    from nvim_mcp import cli
+
+    started: list[None] = []
+    monkeypatch.setattr(cli, "_ensure_broker", lambda: started.append(None))
+    monkeypatch.setattr(cli.splice, "splice", lambda path, revive=None: 0)
+
+    cli.cmd_mcp(argparse.Namespace())
+
+    assert started == []

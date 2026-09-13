@@ -68,6 +68,27 @@ restart by adopting the nvim it left running, with your unsaved edits in it.
   prints an unguessable key; handing that key to an agent is what lets it use
   the session.
 
+## From a sandbox
+
+The MCP client can run confined. The box needs one mount, the directory holding
+the agent socket, read-only:
+
+```
+~/.local/share/nvim-mcp
+```
+
+`connect` works through a read-only mount and `bind` does not, so the box
+reaches the broker on the host, and the broker a client starts when nothing
+answers dies in there instead of serving a second, empty set of sessions under
+the key you pasted. Nothing else has to go in, and the nvim listen sockets must
+not: raw nvim RPC runs arbitrary Lua, so one of those sockets hands over the
+host. `nv mcp` is the command on both sides. The directory also holds a
+standalone copy of the relay, for a box without nvim-mcp installed:
+
+```sh
+python3 ~/.local/share/nvim-mcp/splice.py ~/.local/share/nvim-mcp/agent.sock
+```
+
 ## Install
 
 ```sh
