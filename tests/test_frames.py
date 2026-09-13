@@ -114,12 +114,13 @@ async def test_pop_drops_the_top_frame_and_its_notes(
     await session.show([main_c(repo, 2, "review")], "review", True)
     await session.show([main_c(repo, 5, "aside")], "aside", True, frame="push")
     result = await session.show([], "ignored", True, frame="pop")
-    assert (result["frame"], result["ids"]) == ("A", [])
+    assert (result["frame"], result["popped"], result["ids"]) == ("A", "B", [])
     assert await bands(human) == ["A1  review"]
     assert await quickfix(human) == ("review", ["A1  review"])
 
     result = await session.show([], "ignored", True, frame="pop")
-    assert result["frame"] is None
+    # Emptying the stack once looked the same as doing nothing at all.
+    assert (result["frame"], result["popped"]) == (None, "A")
     assert await bands(human) == []
     assert await quickfix(human) == ("", [])
     with pytest.raises(Refused, match="no frame to pop"):
@@ -234,7 +235,10 @@ async def test_the_wire_carries_frames(running_broker: Path, repo: Path) -> None
     popped = await wire.call("show", {"session": key, "frame": "pop"})
     payload = ShowResult.model_validate(popped["structuredContent"])
     assert (payload.frame, payload.ids, payload.frames) == (None, [], [])
-    assert "frame" not in json.loads(popped["content"][0]["text"])
+    assert payload.popped == "A"
+    body = json.loads(popped["content"][0]["text"])
+    assert "frame" not in body
+    assert body["popped"] == "A"
 
     empty = await wire.call("show", {"session": key, "frame": "pop"})
     assert empty["isError"] is True

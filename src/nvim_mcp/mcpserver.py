@@ -18,6 +18,7 @@ from __future__ import annotations
 import json
 import logging
 from collections.abc import Awaitable, Callable
+from pathlib import Path
 from typing import Any
 
 import anyio
@@ -122,6 +123,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
 
     opened: list[str] = []
     ids: list[str] = []
+    popped: str | None = None
     frame = session.frames[-1].letter if session.frames else None
     attached = await session.attached()
     if locations or request.frame == "pop":
@@ -131,6 +133,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
         opened = result.get("opened", [])
         ids = result["ids"]
         frame = result["frame"]
+        popped = result["popped"]
         # nvim reports how many UIs it has while applying the show, which saves
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
@@ -138,6 +141,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
     return ShowResult(
         **_envelope(session, attached),
         frame=frame,
+        popped=popped,
         ids=ids,
         frames=[
             FrameSummary(letter=f.letter, title=f.title, notes=len(f.notes))
@@ -153,12 +157,17 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     for mark in session.marks:
         if mark.get("id") in acknowledged:
             mark["acked"] = True
+    # An id that names no mark is a mistake worth hearing about: the agent
+    # believes it answered a question that is still waiting.
+    unknown = sorted(acknowledged - {mark.get("id") for mark in session.marks})
     options: dict[str, Any] = {}
+    target: Path | None = None
     if request.what == "range":
         if not request.file:
             raise Refused("read(what='range') needs a file")
+        target = session.root.resolve(request.file)
         options = {
-            "file": str(session.root.resolve(request.file)),
+            "file": str(target),
             "start_line": request.start_line,
             "end_line": request.end_line,
         }
@@ -166,6 +175,8 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     result = await session.read(request.what, options)
     attached = await session.attached()
     envelope = _envelope(session, attached)
+    if unknown:
+        envelope["unknown_ack"] = unknown
 
     if request.what == "marks":
         marks = [Mark.model_validate(mark) for mark in pending(session)]
@@ -179,7 +190,7 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     if request.what == "range":
         state = result.get("range")
         if not state:
-            return ReadResult(**envelope, range=NotOpen(open=False, file=request.file))
+            return ReadResult(**envelope, range=NotOpen(open=False, file=str(target)))
         span = (
             Range.model_validate(state) if _within(session, state) else _outside(state)
         )

@@ -35,8 +35,19 @@ def test_refuses_a_symlink_that_leaves_the_root(repo: Path, tmp_path: Path) -> N
 def test_refuses_directories_and_missing_files(repo: Path) -> None:
     with pytest.raises(Refused, match="regular file"):
         Root.of(repo).resolve("src")
-    with pytest.raises(Refused, match="regular file"):
+    # A path that is not there says so. The two used to share one message, and
+    # a client that had the root wrong was told about file types instead.
+    with pytest.raises(Refused, match="no such file"):
         Root.of(repo).resolve("nope.c")
+    with pytest.raises(Refused, match="no such file"):
+        Root.of(repo).resolve("src/nope/deeper.c")
+
+
+def test_says_outside_before_it_says_missing(repo: Path, tmp_path: Path) -> None:
+    # Existence outside the root is not the client's to learn, so the root
+    # check runs first for a path that is not there either.
+    with pytest.raises(Refused, match="outside"):
+        Root.of(repo).resolve(str(tmp_path / "absent"))
 
 
 def test_does_not_expand_a_tilde(repo: Path) -> None:

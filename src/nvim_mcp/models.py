@@ -52,6 +52,14 @@ class LocationSpec(Request):
         ),
     )
 
+    @model_validator(mode="after")
+    def _range_runs_forward(self) -> LocationSpec:
+        # nvim would collapse a backwards range to its first line, which looks
+        # like a highlight that landed rather than an argument to fix.
+        if self.end_line is not None and self.end_line < self.line:
+            raise ValueError(f"end_line {self.end_line} is before line {self.line}")
+        return self
+
 
 class ShowRequest(Request):
     locations: list[LocationSpec] = Field(
@@ -122,6 +130,9 @@ class ShowResult(Envelope):
     frame: str | None = Field(
         default=None, description="The frame acted on; absent once all are popped"
     )
+    popped: str | None = Field(
+        default=None, description="The frame this call dropped, if any"
+    )
     ids: list[str] = Field(
         description="Ids of the notes just shown, in the order given, to refer to them by"
     )
@@ -171,7 +182,13 @@ class Range(Buffer):
 
 class NotOpen(Result):
     open: Literal[False]
+    #: Resolved, so it reads the same as the path an open buffer comes back
+    #: with. The two used to differ by whatever the caller happened to send.
     file: str
+    hint: str = Field(
+        default="not open in this session; show it first, or read it from disk",
+        description="Why there is no text",
+    )
 
 
 class OutsideRoot(Result):
@@ -182,6 +199,10 @@ class OutsideRoot(Result):
 
 
 class ReadResult(Envelope):
+    unknown_ack: list[int] | None = Field(
+        default=None,
+        description="Acked ids that name no mark, so a mis-ack is not silence",
+    )
     marks: list[Mark] | None = None
     cursor: Cursor | OutsideRoot | None = None
     range: Range | NotOpen | OutsideRoot | None = None

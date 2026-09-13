@@ -223,3 +223,47 @@ async def test_range_reads_unsaved_text_and_refuses_outside_the_root(
     )
     assert result["isError"] is True
     await wire.close()
+
+
+async def test_a_closed_file_says_what_opens_it(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket())
+    # No show, so nothing is open. The reply used to be the path as sent and
+    # nothing else, which reads like an empty file rather than a closed one.
+    payload = await call(
+        wire, "read", session=session["key"], what="range", file="README.md"
+    )
+    span = payload["range"]
+    assert span["open"] is False
+    assert span["file"] == str((repo / "README.md").resolve())
+    assert "show it first" in span["hint"]
+    await wire.close()
+
+
+async def test_acking_an_id_that_names_no_mark_is_reported(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await admin({"cmd": "new", "root": str(repo)})
+    wire = await Wire.connect(paths.agent_socket())
+    await review(wire, session["key"])
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    await nvim.request("nvim_command", "edit src/main.c")
+    await nvim.request("nvim_command", "2Ask look at this")
+    await nvim.close()
+
+    marks = await call(wire, "read", session=session["key"], what="marks")
+    real = marks["marks"][0]["id"]
+    payload = await call(
+        wire, "read", session=session["key"], what="marks", ack=[real, real + 999]
+    )
+    # The real one is answered; silence about the other would have left the
+    # agent believing it answered a question that is still waiting.
+    assert payload["unknown_ack"] == [real + 999]
+    assert payload["marks_pending"] == 0
+
+    clean = await call(wire, "read", session=session["key"], what="marks")
+    assert "unknown_ack" not in clean
+    await wire.close()

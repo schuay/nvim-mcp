@@ -58,6 +58,12 @@ async def test_invalid_read_arguments_are_refused_before_reaching_nvim(
         ({"locations": [{"file": "src/main.c", "line": "3"}]}, "line"),
         ({"locations": [{"file": "src/main.c", "col": 1}]}, "col"),
         ({"locations": [{"file": "src/main.c"}], "focus": "yes"}, "focus"),
+        # nvim would collapse this to line 30 and report a highlight, so it is
+        # caught here where the caller can still see which argument was wrong.
+        (
+            {"locations": [{"file": "src/main.c", "line": 30, "end_line": 10}]},
+            "end_line",
+        ),
     ],
 )
 async def test_invalid_show_arguments_are_refused(

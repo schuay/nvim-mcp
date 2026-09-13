@@ -5,11 +5,14 @@
 
 This is the security boundary for a sandboxed client: it may read only inside
 the root its session was created for. Symlinks resolve before the check, so a
-link planted inside the root cannot point at a credential elsewhere.
+link planted inside the root cannot point at a credential elsewhere, and a path
+outside it is refused before anything is stat'd, so the refusals cannot be read
+as an answer to whether a file elsewhere exists.
 """
 
 from __future__ import annotations
 
+import stat
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -43,14 +46,23 @@ class Root:
             candidate = self.path / candidate
         try:
             resolved = candidate.resolve()
-            regular = resolved.is_file()
         except OSError as e:
             # A symlink loop or an unreadable component refuses this one path
             # rather than failing the whole call.
             raise Refused(f"cannot resolve: {e.strerror or e}") from e
+        # Before the file is touched: whether a path outside the root exists is
+        # not this client's to learn.
         if resolved != self.path and self.path not in resolved.parents:
             raise Refused("outside the session root")
-        if not regular:
+        try:
+            mode = resolved.stat().st_mode
+        except FileNotFoundError:
+            # Distinct from a directory or a device. A client that mistook the
+            # root spells a real file wrong, and needs to be told which it is.
+            raise Refused("no such file") from None
+        except OSError as e:
+            raise Refused(f"cannot resolve: {e.strerror or e}") from e
+        if not stat.S_ISREG(mode):
             raise Refused("not a regular file")
         return resolved
 

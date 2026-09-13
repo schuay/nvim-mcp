@@ -334,8 +334,9 @@ class Session:
         started for this call, startup draws the record, and this call then
         draws it again.
         """
+        popped = None
         if frame == "pop":
-            self._pop(None)
+            popped = self._pop(None).letter
             top = self.frames[-1] if self.frames else None
         else:
             if frame == "push" or not self.frames:
@@ -362,6 +363,7 @@ class Session:
 
         result = await self._attempt(run)
         result["frame"] = top.letter if top else None
+        result["popped"] = popped
         result["ids"] = (
             [note.id for note in top.notes] if top and frame != "pop" else []
         )
