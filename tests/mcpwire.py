@@ -25,6 +25,7 @@ class Wire:
         self.writer = writer
         self.next_id = 0
         self.hello: dict[str, Any] | None = None
+        self.initialized: dict[str, Any] | None = None
 
     @classmethod
     async def connect(cls, socket: Path, key: str | None = None) -> Wire:
@@ -37,7 +38,7 @@ class Wire:
         wire = cls(reader, writer)
         if key is not None:
             wire.hello = await wire.present(key)
-        await wire.request(
+        wire.initialized = await wire.request(
             "initialize",
             {
                 "protocolVersion": "2025-06-18",

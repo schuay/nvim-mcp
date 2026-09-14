@@ -10,7 +10,7 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from showme import paths
+from showme import mcpserver, paths
 from showme.models import ReadResult, ShowResult
 
 pytestmark = pytest.mark.nvim
@@ -124,4 +124,15 @@ async def test_tools_declare_output_schemas_and_results_match_them(
         got = await wire.call("read", {"session": session["key"], "what": what})
         assert not got.get("isError"), got
         ReadResult.model_validate(got["structuredContent"])
+    await wire.close()
+
+
+async def test_initialize_carries_the_server_instructions(
+    running_broker: Path, repo: Path
+) -> None:
+    # A harness shows these to the model before it ever lists the tools, so
+    # they are part of the exposed surface and travel with the handshake.
+    wire = await Wire.connect(paths.agent_socket())
+    assert wire.initialized is not None
+    assert wire.initialized["instructions"] == mcpserver.INSTRUCTIONS
     await wire.close()

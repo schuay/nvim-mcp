@@ -51,6 +51,30 @@ from .session import Location, Session
 
 log = logging.getLogger(__name__)
 
+INSTRUCTIONS = (
+    "showme is a shared editor surface: the nvim the human is sitting in, "
+    "which you draw on and read back. Two tools, and nothing writes -- no "
+    "file, no buffer, no saved edit.\n"
+    "\n"
+    "show puts locations in front of them: a tab per file, the positions in "
+    "the quickfix list, a highlight over any range, and a note above each "
+    "line under an id like A2 that both of you can say. Reach for it when "
+    "they ask to see or be pointed at code, and when your answer is about "
+    "lines they would rather read in place than in chat. Batch the locations "
+    "of one answer into one call, and do not open a tab to quote a value "
+    "back at them.\n"
+    "\n"
+    "read reports their side: where the cursor is and what they last "
+    "selected, an open buffer including edits they have not saved, the open "
+    "tabs, the notes on screen, and the ranges they handed over with :Ask. "
+    "Reach for it when they say 'this', 'here' or 'what I marked'. A mark "
+    "stays pending until you pass its id back in ack, so acknowledge one once "
+    "you have answered it.\n"
+    "\n"
+    "A call names its session by key, unless this client was launched for one "
+    "session and already holds it."
+)
+
 SHOW_TOOL = types.Tool(
     name="show",
     title="Show code to the human",
@@ -326,7 +350,12 @@ def build(
             structured_content=document,
         )
 
-    return Server("showme", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+    return Server(
+        "showme",
+        instructions=INSTRUCTIONS,
+        on_list_tools=on_list_tools,
+        on_call_tool=on_call_tool,
+    )
 
 
 def _error(message: str) -> types.CallToolResult:
