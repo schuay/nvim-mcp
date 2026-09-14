@@ -12,6 +12,7 @@ from pathlib import Path
 
 import pytest
 
+from showme.lifecycle import TERMINAL
 from showme.session import Location, Session
 
 pytestmark = pytest.mark.nvim
@@ -32,7 +33,11 @@ def terminal(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def env_with(script: Path, **extra: str) -> dict[str, str]:
-    return {**os.environ, "SHOWME_TERMINAL": str(script), **extra}
+    return {**os.environ, TERMINAL: str(script), **extra}
+
+
+def env_without(*names: str) -> dict[str, str]:
+    return {k: v for k, v in os.environ.items() if k not in names}
 
 
 async def recorded(log: Path, timeout: float = 5.0) -> list[str]:
@@ -86,14 +91,13 @@ async def test_no_terminal_and_no_display_open_nothing(
     runtime: Path, repo: Path, terminal: tuple[Path, Path], closing: list[Session]
 ) -> None:
     script, log = terminal
-    unset = Session.create("1", repo, clean=True, env={**os.environ})
+    unset = Session.create("1", repo, clean=True, env=env_without(TERMINAL))
     closing.append(unset)
     assert (await shown(unset, repo))["opened_ui"] is False
 
     # Configured, but the session was made somewhere with no display: over ssh
     # the answer is the attach command, not a window nobody can see.
-    headless = {k: v for k, v in env_with(script).items() if k != "WAYLAND_DISPLAY"}
-    headless.pop("DISPLAY", None)
+    headless = {**env_without("WAYLAND_DISPLAY", "DISPLAY"), TERMINAL: str(script)}
     blind = Session.create("2", repo, clean=True, env=headless)
     closing.append(blind)
     assert (await shown(blind, repo))["opened_ui"] is False

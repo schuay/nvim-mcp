@@ -13,7 +13,19 @@ from pathlib import Path
 
 import pytest
 
-from showme import broker, paths
+from showme import broker, lifecycle, paths
+
+
+@pytest.fixture(autouse=True)
+def no_terminal(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the suite off the screen of whoever runs it.
+
+    A session takes the environment it was made in, so a developer with
+    SHOWME_TERMINAL set gets a real window for every session a test shows to,
+    left behind pointing at an nvim the test has since ended. A test that wants
+    a terminal names a stand-in itself.
+    """
+    monkeypatch.delenv(lifecycle.TERMINAL, raising=False)
 
 
 @pytest.fixture
