@@ -12,6 +12,7 @@ from mcpwire import Wire
 
 from showme import paths
 from showme.nvimrpc import NvimRPC
+from showme.session import NOTE_LINES
 
 pytestmark = pytest.mark.nvim
 
@@ -166,37 +167,95 @@ async def test_a_range_past_the_end_of_the_file_still_highlights(
     await wire.close()
 
 
-async def test_a_long_note_folds_to_the_window_width(
+BAND = """
+    local buf = vim.fn.bufnr('src/main.c')
+    local out = {}
+    for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
+        buf, vim.api.nvim_create_namespace('showme-show'), 0, -1,
+        { details = true })) do
+      for _, line in ipairs(mark[4].virt_lines or {}) do
+        out[#out + 1] = line[1][1]
+      end
+    end
+    return { lines = out, columns = vim.o.columns }
+"""
+
+
+async def test_a_long_line_breaks_to_the_window_width(
     running_broker: Path, repo: Path
 ) -> None:
     session = await new_session(repo)
     wire = await Wire.connect(paths.agent_socket())
-    # Prose as an agent writes it: hard-wrapped, and longer than one screen
-    # line. The note keeps its words and the editor decides where they break.
-    paragraph = "\n".join([" ".join(["word"] * 8)] * 40)
+    # Prose as the schema asks for it: one line, longer than one screen line.
+    paragraph = " ".join(["word"] * 320)
     await show(
         wire, session["key"], locations=[{"file": "src/main.c", "text": paragraph}]
     )
 
     nvim = await NvimRPC.connect(Path(session["socket"]))
-    state = await nvim.lua("""
-        local buf = vim.fn.bufnr('src/main.c')
-        local out = {}
-        for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
-            buf, vim.api.nvim_create_namespace('showme-show'), 0, -1,
-            { details = true })) do
-          for _, line in ipairs(mark[4].virt_lines or {}) do
-            out[#out + 1] = line[1][1]
-          end
-        end
-        return { lines = out, columns = vim.o.columns }
-    """)
+    state = await nvim.lua(BAND)
     lines = state["lines"]
     assert len(lines) > 1, lines
     assert max(len(line) for line in lines) <= state["columns"]
     assert lines[0].startswith("  A1  word")
-    # Every word survives the fold, none run together across a source newline.
+    # Every word survives the break, and none run together across one.
     assert " ".join(lines).split() == ["A1"] + ["word"] * 320
+
+    # The width a note was broken against is gone once the window changes, and
+    # nothing else redraws the band.
+    narrowed = await nvim.lua("vim.o.columns = 60\n" + BAND)
+    assert narrowed["columns"] == 60
+    assert max(len(line) for line in narrowed["lines"]) <= 60
+    assert len(narrowed["lines"]) > len(lines)
+    await nvim.close()
+    await wire.close()
+
+
+async def test_a_snippet_keeps_its_line_breaks_and_indentation(
+    running_broker: Path, repo: Path
+) -> None:
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    # Code as an agent writes it, including the two-line form that a reflow
+    # would join because no line in it is indented.
+    snippet = "Use:\n\nif (ok) {\n    foo(a, b);\n}\nbar();"
+    await show(
+        wire, session["key"], locations=[{"file": "src/main.c", "text": snippet}]
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    state = await nvim.lua(BAND)
+    # The id leads the first line and every later line hangs under it, so the
+    # snippet's own indentation is what differs between them.
+    assert [line.rstrip() for line in state["lines"]] == [
+        "  A1  Use:",
+        "",
+        "      if (ok) {",
+        "          foo(a, b);",
+        "      }",
+        "      bar();",
+    ]
+    await nvim.close()
+    await wire.close()
+
+
+async def test_a_tall_note_is_cut_to_the_band(running_broker: Path, repo: Path) -> None:
+    session = await new_session(repo)
+    wire = await Wire.connect(paths.agent_socket())
+    await show(
+        wire,
+        session["key"],
+        locations=[
+            {"file": "src/main.c", "text": "\n".join(f"line {n}" for n in range(200))}
+        ],
+    )
+
+    nvim = await NvimRPC.connect(Path(session["socket"]))
+    state = await nvim.lua(BAND)
+    lines = [line.strip() for line in state["lines"]]
+    assert len(lines) == NOTE_LINES + 1, lines
+    assert lines[0] == "A1  line 0"
+    assert lines[-2:] == [f"line {NOTE_LINES - 1}", "..."]
     await nvim.close()
     await wire.close()
 
@@ -209,7 +268,15 @@ async def test_a_long_note_is_clipped_in_the_quickfix_list(
     await show(
         wire,
         session["key"],
-        locations=[{"file": "src/main.c", "line": 3, "text": "word " * 300}],
+        # The entry is one screen line whatever shape the note has, so the
+        # breaks and the indentation that the band draws close up here.
+        locations=[
+            {
+                "file": "src/main.c",
+                "line": 3,
+                "text": "if (ok) {\n    foo(a, b);\n}\n" + "word " * 300,
+            }
+        ],
     )
 
     nvim = await NvimRPC.connect(Path(session["socket"]))
@@ -222,7 +289,7 @@ async def test_a_long_note_is_clipped_in_the_quickfix_list(
     line = state["line"]
     # nvim draws 'src/main.c|3 col 1 note| ' ahead of the entry's own text, and
     # the whole row has to fit the screen line it gets.
-    assert line.startswith("src/main.c|3 col 1 note| A1  word")
+    assert line.startswith("src/main.c|3 col 1 note| A1  if (ok) { foo(a, b); } word")
     assert len(line) <= state["columns"]
     assert line.endswith("...")
     await nvim.close()

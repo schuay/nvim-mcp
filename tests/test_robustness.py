@@ -16,7 +16,7 @@ import pytest
 from showme import paths, splice
 from showme.clamp import Refused, Root
 from showme.nvimrpc import NvimError, NvimRPC
-from showme.session import NOTE_LIMIT, one_line
+from showme.session import NOTE_LIMIT, NOTE_LINES, clean
 
 
 @pytest.fixture
@@ -102,11 +102,25 @@ def test_a_symlink_loop_is_refused_not_raised(repo: Path) -> None:
 
 
 def test_a_long_note_is_truncated() -> None:
-    assert one_line("x" * (NOTE_LIMIT * 2)).endswith("...")
-    assert len(one_line("x" * (NOTE_LIMIT * 2))) == NOTE_LIMIT
-    assert one_line("short\x07 note") == "short note"
-    # A dropped newline would have run the two words together.
-    assert one_line("wrapped\nprose\tand  spaces") == "wrapped prose and spaces"
+    assert clean("x" * (NOTE_LIMIT * 2)).endswith("...")
+    assert len(clean("x" * (NOTE_LIMIT * 2))) == NOTE_LIMIT
+    # A note taller than the band is cut where the band ends, not where the
+    # characters run out: the lines are what buries the code.
+    tall = clean("\n".join(f"line {n}" for n in range(NOTE_LINES * 2)))
+    assert len(tall) < NOTE_LIMIT
+    assert tall.split("\n")[-2:] == [f"line {NOTE_LINES - 1}", "..."]
+
+
+def test_a_note_keeps_its_line_breaks_and_nothing_else() -> None:
+    # An escape sequence would reach the human's terminal. It leaves a space
+    # behind rather than closing up, and the spaces around it stay: a run of
+    # them inside a line is alignment the note is meant to keep.
+    assert clean("short\x07 note") == "short  note"
+    # The breaks are the shape a snippet is drawn with; a tab would expand
+    # against the window's tab stops rather than the code's.
+    assert clean("if (x) {\n\tfoo();\n}") == "if (x) {\n        foo();\n}"
+    # Blank lines separate paragraphs; a run of them just spends band.
+    assert clean("\n\nfirst\n\n\nsecond  \n\n") == "first\n\nsecond"
 
 
 def test_a_loose_directory_is_tightened(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -35,9 +35,19 @@ from .nvimrpc import NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
 
 #: A note may explain itself, but it still has to leave the code visible. At 80
-#: columns a folded line carries about 65 characters, so this is roughly three
+#: columns a wrapped line carries about 65 characters, so this is roughly three
 #: quarters of a 40-row terminal for a single note.
 NOTE_LIMIT = 2000
+
+#: Lines a note may draw. The character limit alone does not bound the band
+#: now that line breaks survive: a snippet of short lines would spend the same
+#: characters on three times the rows and bury the code it annotates.
+NOTE_LINES = 30
+
+#: A tab in a virtual line expands against the window's own tab stops, which
+#: are not the ones the snippet was written against and count from the band's
+#: left edge rather than the code's. Expand here instead, at nvim's default.
+TAB_WIDTH = 8
 
 #: Bytes of buffer text a mark carries. A question is about a passage, and an
 #: agent that needs more can read the file.
@@ -52,20 +62,33 @@ READ = "return ShowMe.read(...)"
 SYNC = "return ShowMe.sync()"
 
 
-def one_line(text: str) -> str:
-    """Reduce a note to printable characters within the length limit.
+def clean(text: str) -> str:
+    """Reduce a note to printable lines within the note's limits.
 
-    virt_lines accepts newlines and escape sequences without complaint, and the
-    note is rendered in the human's terminal. Newlines and tabs become spaces
-    rather than vanishing, which would run the words on either side together;
-    the Lua half folds the result to the window width.
+    Line breaks are the one piece of layout a note keeps, because reflowing
+    them away is what turns a snippet into a paragraph. The Lua half draws the
+    lines as they are and breaks only what overruns the window.
+
+    Everything else goes. A newline inside a virt_text chunk is not a line
+    break to nvim, which draws it as ^@, so the breaks have to arrive as
+    separate lines; an escape sequence would reach the human's terminal.
     """
-    printable = " ".join(
-        "".join(ch if ch.isprintable() else " " for ch in text).split()
-    )
-    if len(printable) <= NOTE_LIMIT:
-        return printable
-    return printable[: NOTE_LIMIT - 3] + "..."
+    lines: list[str] = []
+    for line in text.expandtabs(TAB_WIDTH).split("\n"):
+        printable = "".join(ch if ch.isprintable() else " " for ch in line)
+        stripped = printable.rstrip()
+        # Leading and repeated blank lines would be spent on empty rows of
+        # band, which cost the same as a row carrying text.
+        if stripped or (lines and lines[-1]):
+            lines.append(stripped)
+    while lines and not lines[-1]:
+        lines.pop()
+    if len(lines) > NOTE_LINES:
+        lines = [*lines[:NOTE_LINES], "..."]
+    note = "\n".join(lines)
+    if len(note) <= NOTE_LIMIT:
+        return note
+    return note[: NOTE_LIMIT - 3].rstrip() + "..."
 
 
 @dataclass
@@ -389,7 +412,7 @@ class Session:
                     file=str(loc.file),
                     line=loc.line,
                     end_line=loc.end_line,
-                    text=one_line(loc.text),
+                    text=clean(loc.text),
                 )
                 for loc in locations
             ]

@@ -138,9 +138,9 @@ local function styles()
 end
 
 -- Virtual lines ignore 'wrap' and this nvim offers no wrapping overflow mode,
--- so a long note is cut off at the window edge with nothing to show it
--- continued. Fold it here instead, against the width of a window showing the
--- buffer. The width is taken once, so resizing the terminal does not re-fold.
+-- so a long note line is cut off at the window edge with nothing to show it
+-- continued. Break it here instead, against the width of a window showing the
+-- buffer; a resize redraws, because the width it was broken against is gone.
 local function textwidth(buf)
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_get_buf(win) == buf then
@@ -151,31 +151,6 @@ local function textwidth(buf)
   return math.max(40, vim.o.columns - 4)
 end
 
-local function fold(text, width, prefix)
-  -- The prefix, the note's id, leads the first line; later lines hang under
-  -- the text so the id stays the one thing in its column.
-  local lines, line = {}, ''
-  local indent = '  ' .. prefix
-  for word in text:gmatch('%S+') do
-    if line == '' then
-      line = indent .. word
-    elseif #line + 1 + #word <= width then
-      line = line .. ' ' .. word
-    else
-      lines[#lines + 1] = line
-      indent = string.rep(' ', 2 + #prefix)
-      line = indent .. word
-    end
-  end
-  if line ~= '' then lines[#lines + 1] = line end
-  return lines
-end
-
-
--- A quickfix entry gets one screen line, which nvim neither wraps nor marks as
--- cut, so a long note would run off the right edge. Clip it to what the entry
--- leaves after nvim's own 'file|line col n note| ' prefix; the band above the
--- code carries the whole text.
 -- Cut to a byte length without splitting a character. A half character is
 -- not UTF-8, and msgpack strings are: one used to break the broker's decoder,
 -- and the broker used to answer a broken connection by replacing the editor.
@@ -185,6 +160,48 @@ local function cut(text, bytes)
 end
 
 
+-- A note is drawn with the line breaks it was written with: reflowing them
+-- into a paragraph is what turns a snippet back into prose, and a snippet is
+-- what most notes point at. Only a line wider than the window is broken.
+local function wrap(text, width, prefix)
+  -- The prefix, the note's id, leads the first line; later lines hang under
+  -- the text so the id stays the one thing in its column. A line broken for
+  -- width hangs again under its own indent, so the break reads as one line
+  -- rather than as the next statement.
+  local lines = {}
+  local first, hang = '  ' .. prefix, string.rep(' ', 2 + #prefix)
+  for line in vim.gsplit(text, '\n', { plain = true }) do
+    local indent = #lines == 0 and first or hang
+    local broken = hang .. line:match('^%s*') .. '  '
+    local body = line
+    repeat
+      local room = math.max(8, width - #indent)
+      if #body <= room then
+        lines[#lines + 1] = indent .. body
+        body = ''
+      else
+        -- Break at the last space when the line has one late enough to leave
+        -- a full line behind. A snippet usually has none, and breaking it
+        -- mid-token is honest where re-joining its words is not.
+        local head = cut(body, room)
+        local at = head:match('^.*()%s')
+        if not at or at < room / 2 then at = #head + 1 end
+        lines[#lines + 1] = indent .. (head:sub(1, at - 1):gsub('%s+$', ''))
+        body = (body:sub(at):gsub('^%s+', ''))
+        indent = broken
+      end
+    until body == ''
+  end
+  return lines
+end
+
+
+-- A quickfix entry gets one screen line, which nvim neither wraps nor marks as
+-- cut, so a long note would run off the right edge. Clip it to what the entry
+-- leaves after nvim's own 'file|line col n note| ' prefix; the band above the
+-- code carries the whole text. A note's line breaks need no work here: nvim
+-- draws a break and the indentation after it as a single space, which only
+-- ever makes the entry shorter than the bytes clipped for it.
 local function clip(text, room)
   if #text <= room then return text end
   return (cut(text, math.max(1, room - 3)):gsub('%s+$', '')) .. '...'
@@ -282,7 +299,7 @@ function M.render(buf)
           bands[first] = {}
           rows[#rows + 1] = first
         end
-        for _, text in ipairs(fold(note.text, textwidth(buf), note.id .. '  ')) do
+        for _, text in ipairs(wrap(note.text, textwidth(buf), note.id .. '  ')) do
           -- An empty final chunk extends the highlight to the end of the screen
           -- line, so the note reads as a band rather than coloured text.
           table.insert(bands[first], { { text, 'ShowMeNote' }, { '', 'ShowMeNote' } })
@@ -527,6 +544,10 @@ vim.api.nvim_create_autocmd('VimEnter', {
   end,
 })
 vim.api.nvim_create_autocmd('ColorScheme', { group = group, callback = styles })
+-- Notes were broken against the width of the window they were drawn in, and
+-- nothing redraws them on its own: a narrowed window would run them off its
+-- edge until the next call.
+vim.api.nvim_create_autocmd('VimResized', { group = group, callback = M.render_all })
 vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWinEnter' }, {
   group = group,
   callback = function(ev) M.render(ev.buf) end,
