@@ -29,6 +29,12 @@ each line. `read` reports what you are looking at: your cursor and selection,
 the contents of an open buffer including unsaved edits, the open buffers, and
 the questions you have asked.
 
+showme opens files from disk, so anything the agent generates it writes out
+first. Asked to annotate a diff it puts `git diff` in a file -- `.git/review.diff`,
+which `git status` never mentions -- and hangs the notes on its lines; the
+`.diff` name is what nvim highlights it by. That works from a sandbox too,
+where the root is the only place its key reaches.
+
 Notes live in frames. A show replaces the top frame by default; the agent can
 push a frame for a digression and pop it when answered, and every live frame
 stays on screen with the quickfix list walking the top one. Each note carries

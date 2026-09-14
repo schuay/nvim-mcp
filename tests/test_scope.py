@@ -15,6 +15,7 @@ from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
 from showme import paths
+from showme.nvimrpc import NvimRPC
 
 pytestmark = pytest.mark.nvim
 
@@ -133,3 +134,42 @@ async def test_the_host_key_survives_a_broker_restart(
         await wire.close()
     finally:
         await stop_broker(stop, task)
+
+
+async def test_a_clamped_key_shows_a_diff_it_wrote_inside_the_root(
+    running_broker: Path, repo: Path
+) -> None:
+    """The whole of what a box can do when it is asked to annotate a diff.
+
+    It has nowhere outside the root to write and nowhere outside the root to
+    show from, so the one recipe the tool description gives has to work with
+    the clamped key and not only with the host one.
+    """
+    patch = repo / ".git" / "review.diff"
+    patch.write_text("--- a/src/main.c\n+++ b/src/main.c\n@@ -1 +1 @@\n-was\n+is\n")
+    _, clamped = await keys(repo)
+    wire = await Wire.connect(paths.agent_socket())
+
+    payload = await call(
+        wire,
+        "show",
+        clamped,
+        locations=[{"file": ".git/review.diff", "line": 4, "text": "why"}],
+    )
+    assert payload["refused"] == []
+    assert payload["opened"] == [str(patch)]
+
+    # The extension is the whole of what makes it readable: bufload runs
+    # filetype detection, so the diff arrives highlighted rather than flat.
+    reply = await admin({"cmd": "ensure", "root": str(repo), "open": True})
+    nvim = await NvimRPC.connect(Path(reply["socket"]))
+    filetype = await nvim.lua("""
+        for _, buf in ipairs(vim.api.nvim_list_bufs()) do
+          if vim.api.nvim_buf_get_name(buf):match('review%.diff$') then
+            return vim.bo[buf].filetype
+          end
+        end
+    """)
+    assert filetype == "diff"
+    await nvim.close()
+    await wire.close()
