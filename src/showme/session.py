@@ -317,6 +317,18 @@ class Session:
             SESSION_INIT, options, *([frames] if frames is not None else [])
         )
 
+    async def wear_background(self, background: str) -> None:
+        """Take the background an attaching terminal reported.
+
+        A session created with --light or --dark keeps that value: the flag is
+        the human's standing choice, and a terminal answering otherwise does
+        not undo it. What the terminal says is not saved either, because the
+        next terminal to attach may be a different one; it is asked again.
+        """
+        if self.background is not None or self.rpc is None:
+            return
+        await self.rpc.request("nvim_set_option_value", "background", background, {})
+
     def _frames_for_lua(self) -> list[dict[str, Any]]:
         return [frame.state() for frame in self.frames]
 

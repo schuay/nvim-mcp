@@ -19,15 +19,19 @@ import contextlib
 import fcntl
 import json
 import os
+import re
 import secrets
+import select
 import shutil
 import signal
 import socket
 import struct
 import subprocess
 import sys
+import termios
 import textwrap
 import time
+import tty
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -219,11 +223,82 @@ def cmd_ls(_args: argparse.Namespace) -> int:
     return 0
 
 
+#: OSC 11 asks the terminal for its background colour; the reply names it as
+#: one to four hex digits per channel.
+_OSC11_QUERY = b"\x1b]11;?\x07"
+_OSC11_REPLY = re.compile(
+    rb"\x1b\]11;rgba?:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})"
+)
+
+
+def _background_of(red: str, green: str, blue: str) -> str:
+    """Classify an OSC 11 reply as 'light' or 'dark' by luma.
+
+    Channels carry one to four hex digits and each scales against its own
+    width, so "f", "ff" and "ffff" all mean full intensity.
+    """
+    r, g, b = (int(c, 16) / (16 ** len(c) - 1) for c in (red, green, blue))
+    return "light" if (0.299 * r + 0.587 * g + 0.114 * b) > 0.5 else "dark"
+
+
+def _detect_background(timeout: float = 0.15) -> str | None:
+    """Ask the terminal this process is attached to for its background.
+
+    The session's nvim is headless and never sees a terminal, so nothing there
+    can answer this. Only the process the human runs can, which is why the
+    query belongs here and not in the broker. Returns None when there is no
+    terminal or it stays silent, leaving the session's own setting to stand.
+    """
+    try:
+        fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
+    except OSError:
+        return None
+    try:
+        saved = termios.tcgetattr(fd)
+    except termios.error:
+        # Not a terminal, so there is nothing to ask.
+        os.close(fd)
+        return None
+    try:
+        return _read_osc11(fd, timeout)
+    except OSError:
+        return None
+    finally:
+        # Raw mode and the descriptor are ours for the length of the query
+        # only; the human's terminal has to go back the way it was.
+        termios.tcsetattr(fd, termios.TCSADRAIN, saved)
+        os.close(fd)
+
+
+def _read_osc11(fd: int, timeout: float) -> str | None:
+    """Send the query on `fd` and read until the reply or `timeout`."""
+    tty.setraw(fd)
+    os.write(fd, _OSC11_QUERY)
+    buf = b""
+    deadline = time.monotonic() + timeout
+    while (remaining := deadline - time.monotonic()) > 0:
+        if not select.select([fd], [], [], remaining)[0]:
+            break
+        chunk = os.read(fd, 256)
+        if not chunk:
+            break
+        buf += chunk
+        if found := _OSC11_REPLY.search(buf):
+            return _background_of(*(g.decode() for g in found.groups()))
+    return None
+
+
 def cmd_attach(args: argparse.Namespace) -> NoReturn:
     _ensure_broker()
+    # The terminal is here, and the reply is what it looks like right now, so
+    # ask before handing the process over to nvim. The broker keeps an explicit
+    # --light or --dark ahead of this.
+    background = os.environ.get("SHOWME_BACKGROUND") or _detect_background()
     # The broker starts the session's nvim if it has to; a socket path alone
     # would be an error when nothing listens on it.
-    reply = _ask({"cmd": "attach", "id": args.id}, timeout=30.0)
+    reply = _ask(
+        {"cmd": "attach", "id": args.id, "background": background}, timeout=30.0
+    )
     if not reply["ok"]:
         raise SystemExit(f"showme: {reply['error']}")
     nvim = shutil.which("nvim")

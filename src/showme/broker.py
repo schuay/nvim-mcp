@@ -201,11 +201,17 @@ class Broker:
             self.save()
             return True
 
-    async def attach(self, sid: str) -> Session | None:
-        """Have a session's nvim running so a terminal can attach to it."""
+    async def attach(self, sid: str, background: str | None = None) -> Session | None:
+        """Have a session's nvim running so a terminal can attach to it.
+
+        `background` is what the attaching terminal answered, which only that
+        process could ask; the session decides whether it outranks its own.
+        """
         session = self.sessions.get(sid)
         if session is not None:
             await session.ensure()
+            if background is not None:
+                await session.wear_background(background)
         return session
 
     async def close(self) -> None:
@@ -317,7 +323,10 @@ async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _attach(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
-    session = await broker.attach(str(request["id"]))
+    background = request.get("background")
+    session = await broker.attach(
+        str(request["id"]), str(background) if background is not None else None
+    )
     if session is None:
         raise Refused(f"no session {request['id']}")
     return {"socket": str(session.socket)}
