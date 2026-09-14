@@ -100,6 +100,7 @@ async def test_a_resumed_conversation_is_given_its_session_back(
     spare = broker.sessions[second["id"]]
     assert spare.released
     assert broker.session_by_key(second["key"])[0].sid == one.hello["session"]
+    spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
     await broker.collect()
     listing = await admin({"cmd": "ls"})
     assert [s["id"] for s in listing["sessions"]] == [one.hello["session"]]
@@ -212,7 +213,7 @@ async def test_a_session_a_client_holds_is_never_collected(
 ) -> None:
     broker = Broker()
     session = await broker.launch_session(str(repo), clean=True)
-    broker.hold(session.sid)
+    broker.hold(session)
     await stale(broker, session.sid)
     await broker.collect()
     assert list(broker.sessions) == [session.sid]
@@ -621,11 +622,17 @@ async def test_a_resume_does_not_race_an_attach_that_has_started(
     assert claimed is not None and claimed.session is mine
     await attaching
     try:
-        # The editor the human is on the way into is still there, and the
-        # collector is what decides its fate once it can ask about the UI.
+        # The editor the human is on the way into is still there, and a
+        # terminal that has been asked for looks from the registry exactly
+        # like one that never was: the grace is what tells them apart.
         assert spare.alive
         await broker.collect()
-        assert spare.sid not in broker.sessions, "an empty spare should go"
+        assert spare.sid in broker.sessions, "collected while a terminal came up"
+
+        # Once the grace has passed with nobody in it, it goes.
+        spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
+        await broker.collect()
+        assert spare.sid not in broker.sessions
     finally:
         for session in list(broker.sessions.values()):
             await session.close()
@@ -672,12 +679,21 @@ async def test_a_hold_does_not_outlive_the_session_it_was_taken_on(
     would keep whatever takes its id next from ever being collected."""
     broker = Broker()
     first = await broker.launch_session(str(repo), clean=True)
-    broker.hold(first.sid)
+    broker.hold(first)
     await broker.kill(first.sid)
 
     second = await broker.launch_session(str(repo), clean=True)
     assert second.sid == first.sid
+    broker.hold(second)
+    # The first session's client goes away now, naming a session that no
+    # longer exists. Letting go by id would let go of the new one's hold.
+    broker.release(first)
+    assert broker.held == {second.sid: 1}
+
     await stale(broker, second.sid)
+    await broker.collect()
+    assert list(broker.sessions) == [second.sid]
+    broker.release(second)
     await broker.collect()
     assert broker.sessions == {}
 
@@ -714,3 +730,74 @@ async def test_a_session_stops_answering_to_the_launches_it_has_outlived(
     finally:
         for live in list(broker.sessions.values()):
             await live.close()
+
+
+async def test_the_human_in_a_handed_over_session_is_told_so(
+    runtime: Path, repo: Path
+) -> None:
+    """Nothing will ever draw there again, and an editor that cannot answer
+    looks exactly like an agent that has gone quiet."""
+    broker = Broker()
+    mine = await broker.launch_session(str(repo), clean=True)
+    mine.agent, mine.stable = CLAUDE, True
+    spare = await broker.launch_session(str(repo), clean=True)
+    await spare.ensure()
+    said: list[str] = []
+
+    async def remember(message: str) -> None:
+        said.append(message)
+
+    spare._tell_human = remember  # type: ignore[method-assign]
+
+    await broker.claim(spare.key, CLAUDE, True)
+    try:
+        assert said == [], "not before anyone is known to be there"
+
+        # A terminal on it is what says a human is, and the collector -- which
+        # keeps it for that reason -- is the one caller that asks.
+        async def has_a_terminal(timeout: float = 30.0) -> bool:
+            return True
+
+        spare.attached = has_a_terminal  # type: ignore[method-assign]
+        spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
+        await broker.collect()
+        assert spare.sid in broker.sessions
+        # Said without waiting for the editor: the collector is on the
+        # broker's own loop and does not stop for a notice.
+        await until(lambda: len(said) == 1)
+        assert str(repo) in said[0]
+        # And only once, however long they sit there.
+        spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
+        await broker.collect()
+        await asyncio.sleep(0.05)
+        assert len(said) == 1
+    finally:
+        del spare.attached  # type: ignore[attr-defined]
+        for session in list(broker.sessions.values()):
+            await session.close()
+        await spare.close()
+
+
+async def test_a_session_claimed_again_is_no_longer_on_its_way_out(
+    runtime: Path, repo: Path
+) -> None:
+    """`showme ls` prints the key a released session was given when it lost
+    the one it had, so a human can hand it out. A client that reaches it puts
+    it back in use, and it gets a window like any other rather than going on
+    the next pass."""
+    broker = Broker()
+    mine = await broker.launch_session(str(repo), clean=True)
+    mine.agent, mine.stable = CLAUDE, True
+    spare = await broker.launch_session(str(repo), clean=True)
+    await broker.claim(spare.key, CLAUDE, True)
+    assert spare.released
+
+    claimed = await broker.claim(spare.key, "other:1", True)
+    assert claimed is not None and claimed.session is spare
+    assert not spare.released
+
+    spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
+    await broker.collect()
+    assert spare.sid in broker.sessions
+    for session in list(broker.sessions.values()):
+        await session.close()

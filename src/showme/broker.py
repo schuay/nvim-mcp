@@ -58,6 +58,12 @@ TICK_SECONDS = 5.0
 RESUMABLE_SECONDS = 24 * 60 * 60
 LAUNCH_SECONDS = 30 * 60
 
+#: How long a released session is kept. It answers to nothing, so this is not
+#: for anyone to come back to it -- it is for a terminal that has been asked
+#: for and has not drawn yet, which from the registry looks exactly like one
+#: that was never asked for at all.
+RELEASED_SECONDS = 60.0
+
 #: How long the collector waits for an nvim to say whether a UI is on it.
 #: Short because this runs on the broker's loop, which serves every client.
 PROBE_SECONDS = 5.0
@@ -109,14 +115,22 @@ class Broker:
     def clients(self) -> int:
         return len(self.connections)
 
-    def hold(self, sid: str) -> None:
-        self.held[sid] = self.held.get(sid, 0) + 1
+    def hold(self, session: Session) -> None:
+        self.held[session.sid] = self.held.get(session.sid, 0) + 1
 
-    def release(self, sid: str) -> None:
-        if self.held.get(sid, 0) <= 1:
-            self.held.pop(sid, None)
+    def release(self, session: Session) -> None:
+        """Let go of a hold taken on this session.
+
+        By identity, not by id: a killed session's id is handed out again, and
+        its holds went with it. A client of the old one leaving must not
+        decide anything about the session that has the id now.
+        """
+        if self.sessions.get(session.sid) is not session:
+            return
+        if self.held.get(session.sid, 0) <= 1:
+            self.held.pop(session.sid, None)
         else:
-            self.held[sid] -= 1
+            self.held[session.sid] -= 1
 
     def in_use(self, key: str) -> tuple[Session, Root] | None:
         """Resolve a key for a tool call, counting it as contact.
@@ -247,6 +261,9 @@ class Broker:
                     self._release(prepared)
                     session = mine
             session.agent, session.stable = agent, stable
+            # A client reached it, so it is nobody's leftover: a session let
+            # go of and then claimed again is in use like any other.
+            session.released = False
             session.touch()
             self.save()
             return Claim(key, session, root)
@@ -409,6 +426,18 @@ class Broker:
                 # Being read counts as being used, and the human closing that
                 # terminal is what starts the clock again.
                 session.touch()
+                if session.released and not session.warned:
+                    # Someone is sitting in a session nothing can draw in
+                    # again. Saying nothing leaves them watching an editor
+                    # that cannot answer, with no way to tell that from an
+                    # agent that is merely quiet. Here rather than where it
+                    # was released: this is the one place that knows a human
+                    # is really there, and it is off the registry lock.
+                    session.warned = True
+                    session.warn(
+                        f"this session was handed over -- "
+                        f"run: showme {session.root.path}"
+                    )
                 continue
             async with self._lock:
                 if self.sessions.get(session.sid) is not session:
@@ -427,16 +456,17 @@ class Broker:
     def _is_stale(self, session: Session) -> bool:
         if session.human or self.held.get(session.sid):
             return False
-        if session.released:
-            # Nothing holds a key to it and nothing will: the only question
-            # left is whether a terminal is on it, which the caller asks.
-            return True
         age = time.time() - session.last_seen
         if age < 0:
             # The clock moved backwards. Taking it as contact costs a session
             # one window; the alternative is never collecting it again.
             session.touch()
             return False
+        if session.released:
+            # Nothing holds a key to it and nothing will, so it goes soon --
+            # but not before a terminal on its way in has had time to draw,
+            # and not so often that a busy nvim is probed on every tick.
+            return age >= RELEASED_SECONDS
         return age >= (RESUMABLE_SECONDS if session.stable else LAUNCH_SECONDS)
 
     async def close(self) -> None:
@@ -662,7 +692,7 @@ async def _agent_client(
             return
         session = claimed.session if claimed is not None else None
         if session is not None:
-            broker.hold(session.sid)
+            broker.hold(session)
         server = mcpserver.build(
             broker.in_use,
             broker.save,
@@ -677,7 +707,7 @@ async def _agent_client(
         if session is not None:
             # The conversation may be back -- resumed, or its server restarted
             # -- so the session stays, and this is when it starts ageing.
-            broker.release(session.sid)
+            broker.release(session)
             session.touch()
             broker.save()
         broker.connections.discard(task)

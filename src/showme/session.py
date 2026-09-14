@@ -222,6 +222,10 @@ class Session:
     #: Prepared for a launch that turned out to be resuming a conversation
     #: with a session already. It answers to nothing and is on its way out.
     released: bool = False
+    #: Whether whoever is in it has been told that. Not saved: a broker that
+    #: restarts has no way to know they saw it, and saying so twice is better
+    #: than leaving them waiting on an editor that cannot answer.
+    warned: bool = field(default=False, repr=False)
     #: What the session shows, bottom frame first, and what the human has
     #: handed back. nvim draws this; it does not own it.
     frames: list[Frame] = field(default_factory=list)
@@ -631,10 +635,32 @@ class Session:
             self._changed()
             await self._tell_human(f"popped {popped.letter}")
 
+    def warn(self, message: str) -> None:
+        """Say something in this session's nvim without waiting for it.
+
+        For a caller holding the broker's registry lock, which has no business
+        waiting on an editor.
+        """
+        if not self.alive:
+            return
+        task = asyncio.create_task(self._tell_human(message))
+        self._tasks.add(task)
+        task.add_done_callback(self._tasks.discard)
+
     async def _tell_human(self, message: str) -> None:
+        """Put a line in front of whoever is in this nvim.
+
+        Scheduled rather than run where it lands: a message wider than the
+        window makes nvim ask the human to press enter, and notifying inside
+        the call would hold the answer -- and the channel behind it -- until
+        they did.
+        """
         assert self.rpc is not None
         with contextlib.suppress(Exception):
-            await self.rpc.lua("vim.notify(...)", f"showme: {message}")
+            await self.rpc.lua(
+                "local message = ...\nvim.schedule(function() vim.notify(message) end)",
+                f"showme: {message}",
+            )
 
     async def read(self, what: str, options: dict[str, Any]) -> dict[str, Any]:
         async def run() -> Any:
