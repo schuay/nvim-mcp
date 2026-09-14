@@ -5,7 +5,7 @@ of the code. The agent opens the locations it is talking about and annotates
 them at the line; the human marks a range in the editor and asks about it.
 
 ```sh
-uv tool install showme-mcp
+uv tool install git+https://github.com/schuay/showme-mcp
 showme install claude # or codex, gemini, opencode -- shows the change and asks
 ```
 
@@ -128,9 +128,11 @@ python3 ~/.local/share/showme/splice.py ~/.local/share/showme/agent.sock
 ## Install
 
 ```sh
-uv tool install .                                 # showme on PATH
+uv tool install git+https://github.com/schuay/showme-mcp
 claude mcp add --scope user showme -- showme mcp  # or your client's equivalent
 ```
+
+From a clone, `uv tool install .` installs that working tree instead.
 
 For development:
 
