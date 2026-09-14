@@ -93,9 +93,7 @@ async def test_a_resumed_conversation_is_given_its_session_back(
     assert two.hello["session"] == one.hello["session"]
     assert await notes_of(two) == ["from the first run"]
 
-    # And the session the second launch prepared answers to nothing and is
-    # taken on the collector's next pass: leaving it would be the pile this
-    # change is about.
+    # The spare loses its original key and becomes eligible for collection.
     broker = await running_broker_object()
     spare = broker.sessions[second["id"]]
     assert spare.released
@@ -498,8 +496,7 @@ async def test_a_tool_call_counts_as_contact(running_broker: Path, repo: Path) -
 async def test_the_broker_collects_on_its_own(
     runtime: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Nothing calls the collector but the broker's own loop, and no test
-    drove that loop."""
+    """Exercise collection through the broker loop."""
     monkeypatch.setattr(broker_module, "TICK_SECONDS", 0.05)
     stop, task = await start_broker()
     try:
@@ -622,9 +619,7 @@ async def test_a_resume_does_not_race_an_attach_that_has_started(
     assert claimed is not None and claimed.session is mine
     await attaching
     try:
-        # The editor the human is on the way into is still there, and a
-        # terminal that has been asked for looks from the registry exactly
-        # like one that never was: the grace is what tells them apart.
+        # Keep the editor alive while the terminal connects its UI.
         assert spare.alive
         await broker.collect()
         assert spare.sid in broker.sessions, "collected while a terminal came up"

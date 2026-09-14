@@ -45,30 +45,19 @@ CONNECTION_LOST = -32000
 #: no argument is rewritten, so this side still holds no schema.
 HELLO = "showme"
 
-#: Environment variables carrying the harness's own id for the conversation
-#: this client was started for, tried in order. Each was verified by reading
-#: the environment of a running MCP server process; a harness is supported by
-#: checking what it exports there and whether the value survives its resume,
-#: and adding the name here. A harness missing from the list costs its
-#: conversations nothing but the chance to be resumed.
+#: Harness variables supplying conversation ids that survive resume.
 SESSION_VARS = ("CLAUDE_CODE_SESSION_ID",)
 
 
 def identify() -> tuple[str, bool]:
-    """Name the conversation this client serves, and say if the name lasts.
+    """Return a harness conversation id, or a unique id for this process.
 
-    A session belongs to a conversation, and only the harness knows where one
-    begins and ends: this process is not the unit, since a harness may restart
-    its MCP server in the middle of a conversation and does start a fresh one
-    for a resumed one. Where the harness publishes its id, the session it
-    names can be picked up again; where it does not, a made-up id keeps this
-    launch's notes to itself, which is the property that matters most.
+    Only harness ids support resuming across MCP process restarts.
     """
     for name in SESSION_VARS:
         value = os.environ.get(name)
         if value:
-            # Qualified by the variable it came from: two harnesses numbering
-            # their sessions from one would otherwise name each other's.
+            # Include the harness variable to avoid cross-harness id collisions.
             return f"{name}:{value}", True
     return f"launch:{uuid.uuid4().hex}", False
 

@@ -193,9 +193,7 @@ def cmd_box(args: argparse.Namespace) -> int:
     spec.write_text(f'ro = [\n    "{directory}",\n]\n')
     # stdout is the one thing a launcher consumes; the rest is for the human.
     print(spec)
-    # By the root, not the session id: the id printed here names the session
-    # this launch prepared, which is not the one the agent gets if it turns
-    # out to be resuming a conversation. The root is true either way.
+    # Resume may select a different session id; attach by root instead.
     print(
         f"showme: session for {reply['root']}\n"
         f"showme: attach with:  showme {reply['root']}",
@@ -221,8 +219,7 @@ def cmd_ls(_args: argparse.Namespace) -> int:
         return 0
     for session in sessions:
         state = "attached" if session["attached"] else "detached"
-        # Several sessions can be rooted in one tree -- one per conversation
-        # working there -- so the root alone no longer tells them apart.
+        # Frame summaries distinguish conversations in the same tree.
         showing = session.get("showing") or "nothing shown"
         print(
             f"{session['id']:>3}  {state:<8}  {session['root']}\n"
@@ -306,9 +303,7 @@ def cmd_attach(args: argparse.Namespace) -> NoReturn:
     background = os.environ.get("SHOWME_BACKGROUND") or _detect_background()
     # The broker starts the session's nvim if it has to; a socket path alone
     # would be an error when nothing listens on it.
-    # Resolved here, like every other root this sends: the broker's cwd is
-    # whichever shell first started it, and `showme .` taken against that
-    # names a tree the human is not standing in.
+    # Resolve against this shell's cwd, which can differ from the broker's.
     reply = _ask(
         {"cmd": "attach", "id": _attach_target(args.id), "background": background},
         timeout=30.0,
@@ -349,24 +344,11 @@ def cmd_mcp(_args: argparse.Namespace) -> int:
 
 
 def _session_here() -> str | None:
-    """Take the session rooted where this client was started, making one if
-    there is none.
+    """Prepare a launcher session and return its host key.
 
-    This is what makes the tools work on their own: nothing to create by hand
-    and no key to paste. Only a client on the host can do it, because it goes
-    through the admin socket, which lives in the runtime directory that no
-    sandbox mounts -- the same split that keeps session administration off the
-    surface a box can reach.
-
-    One per client process, and the broker decides from the hello whether this
-    is a conversation it already has a session for. A harness that restarts
-    its MCP server mid-conversation asks again here, and gets its own session
-    back.
-
-    The key it comes back with reads outside the root, because this client is
-    the human: it reads their files with its own tools either way, and a clamp
-    here would only refuse it the worktree next door. The root still says where
-    relative paths are taken from and where nvim runs.
+    The admin socket is inaccessible to sandboxes. Its host key permits reads
+    outside the root, which still sets relative paths and nvim's cwd. The hello
+    selects an existing session when the harness supplies a conversation id.
     """
     try:
         _ensure_broker()

@@ -13,15 +13,12 @@ which is what lets it take the key that reads outside its session's root. A
 sandboxed one never gets to make the claim: its key is put where it will find
 it by a launcher running out here.
 
-A session belongs to one agent conversation. A launcher prepares one per
-launch because it cannot know which conversation it is starting; the client
-names that conversation when it connects, and this is where the two are put
-together -- handing back the session a resumed conversation already had, and
-dropping the spare. Keying sessions on the tree instead is what let one
-conversation's notes land in a frame another had abandoned there.
+Launchers prepare separate sessions. The client identifies its conversation
+at hello, allowing the broker to select an existing session on resume.
+Separate conversations keep separate frames even when they share a root.
 
-Nothing marks the end of a conversation, so the collector decides: a session
-no client holds, with no terminal on it, is taken once its window has passed.
+The collector expires automatic sessions with no clients or attached UIs.
+Manual sessions persist until explicitly killed.
 """
 
 from __future__ import annotations
@@ -47,42 +44,29 @@ log = logging.getLogger(__name__)
 #: Exit once nothing has needed the broker for this long.
 IDLE_EXIT_SECONDS = 15 * 60
 
-#: How often the loop looks at the sessions: how long a shutdown waits, and
-#: how soon the collector sees a session go quiet.
+#: Interval between collection passes.
 TICK_SECONDS = 5.0
 
-#: How long a detached session is kept before the collector takes it. A named
-#: conversation may be resumed, and is given a day to come back; one that made
-#: its own name cannot be resumed at all, so it is kept only long enough for
-#: the human to finish reading a review the agent left behind.
+#: Retention for sessions with harness ids and process-local ids, respectively.
 RESUMABLE_SECONDS = 24 * 60 * 60
 LAUNCH_SECONDS = 30 * 60
 
-#: How long a released session is kept. It answers to nothing, so this is not
-#: for anyone to come back to it -- it is for a terminal that has been asked
-#: for and has not drawn yet, which from the registry looks exactly like one
-#: that was never asked for at all.
+#: Grace period for a terminal connecting to a released session.
 RELEASED_SECONDS = 60.0
 
-#: How long the collector waits for an nvim to say whether a UI is on it.
-#: Short because this runs on the broker's loop, which serves every client.
+#: Timeout for the nvim UI request.
 PROBE_SECONDS = 5.0
 
-#: How long a line a client may send. One tool call is one line, and the
-#: contract accepts 50 locations carrying 2000 characters of note each, which
-#: is several times asyncio's 64 KiB default: a call the tools would have
-#: accepted arrived as a closed connection instead. `showme` sends the whole
-#: environment of the shell it ran in, which is smaller but not by much.
+#: Accept batches of 50 locations with 2000-character notes, which exceed
+#: asyncio's default 64 KiB line limit.
 LINE_LIMIT = 4 * 1024 * 1024
 
 
 @dataclass
 class Claim:
-    """The session a client reached, and what the key it presented reaches.
+    """The claimed session and the access granted by the presented key.
 
-    The key is kept as the client sent it: a host client presents the
-    unclamped one, and answering its later calls with the session's clamped
-    key instead would quietly take away the reach it connected with.
+    Preserve the presented key so host clients keep access outside the root.
     """
 
     key: str
@@ -96,11 +80,8 @@ class Broker:
         #: Live client connections. Closing a listener waits for these, so
         #: shutdown has to end them itself or a connected client pins the broker.
         self.connections: set[asyncio.Task[None]] = set()
-        #: How many clients hold each session right now, by sid. The collector
-        #: leaves a held session alone however old its last contact is. A
-        #: count rather than a set: one conversation can have two connections
-        #: -- a restarted MCP server overlapping its predecessor -- and the
-        #: first to close must not unhold the session for the other.
+        #: Connection counts prevent collection while any client holds a session.
+        #: MCP process restarts can leave overlapping connections.
         self.held: dict[str, int] = {}
         #: Held while the registry changes. Creating a session awaits nvim
         #: startup, and two creations that pick an id before either has
@@ -119,11 +100,9 @@ class Broker:
         self.held[session.sid] = self.held.get(session.sid, 0) + 1
 
     def release(self, session: Session) -> None:
-        """Let go of a hold taken on this session.
+        """Release a connection's hold.
 
-        By identity, not by id: a killed session's id is handed out again, and
-        its holds went with it. A client of the old one leaving must not
-        decide anything about the session that has the id now.
+        Check object identity because session ids are reused after deletion.
         """
         if self.sessions.get(session.sid) is not session:
             return
@@ -133,12 +112,7 @@ class Broker:
             self.held[session.sid] -= 1
 
     def in_use(self, key: str) -> tuple[Session, Root] | None:
-        """Resolve a key for a tool call, counting it as contact.
-
-        What the collector measures is when a session was last of use to
-        anyone. A connection that is held open for hours and calls throughout
-        is exactly that, and nothing else on the call path would say so.
-        """
+        """Resolve a tool-call key and refresh the session expiry time."""
         found = self.session_by_key(key)
         if found is not None:
             found[0].touch()
@@ -185,12 +159,7 @@ class Broker:
         background: str | None = None,
         env: dict[str, str] | None = None,
     ) -> Session:
-        """Make a session for the human, who asked for it by hand.
-
-        Not the collector's business however long it sits: they made it, it
-        holds whatever they have been doing in it -- unwritten buffers
-        included -- and `showme kill` is what ends one.
-        """
+        """Create a manual session that persists until `showme kill`."""
         async with self._lock:
             return await self._create(root, clean, background, env, human=True)
 
@@ -201,39 +170,20 @@ class Broker:
         background: str | None = None,
         env: dict[str, str] | None = None,
     ) -> Session:
-        """Record a session for a launcher about to start an agent.
+        """Prepare a separate session for each launcher.
 
-        One per launch, never shared: a launcher cannot know which
-        conversation it is starting -- the harness has not assigned an id yet
-        -- so it cannot pick the session, only prepare one. Which session the
-        agent ends up on is settled at the hello, where its own name is
-        finally known, and this one is handed over or dropped there.
-
-        nvim waits until something is shown. An agent that opens nothing
-        should not cost the human an editor process, and the launch context
-        collected here -- the shell's environment, the terminal's background --
-        is what that nvim will be started with whenever it is.
-
-        The root is the directory the launcher was standing in, and nothing
-        here second-guesses it. The tree it names is the one that launcher has
-        already handed the agent, so a key clamped to it reaches nothing the
-        agent could not reach with its own tools, and a directory that holds no
-        repository is a project like any other.
+        The client identifies its conversation at hello, when claim() can
+        select an existing session. Defer nvim startup until the first show,
+        using the root and environment supplied by this launcher.
         """
         async with self._lock:
             return await self._create(root, clean, background, env, spawn=False)
 
     async def claim(self, key: str, agent: str, stable: bool) -> Claim | None:
-        """Give a client the session its conversation is on.
+        """Select the conversation's session and preserve the presented key's access.
 
-        The key says which launch this is and what that launch may reach; the
-        agent says whose conversation it serves. A conversation that already
-        has a session takes it back -- this is a resumed one, or a client
-        reconnecting after its MCP server was restarted -- and the session
-        left by the launch is dropped, having never been shown anything. The
-        session that survives answers to the keys the client actually holds,
-        since the ones it was created with are the only pair that client
-        knows.
+        A resumed conversation can replace an unused launcher session. Transfer
+        its keys so clients can keep using the credentials they received.
         """
         async with self._lock:
             found = self.session_by_key(key)
@@ -241,18 +191,12 @@ class Broker:
                 return None
             prepared, root = found
             if not agent:
-                # A client that does not name itself gets what its key names
-                # and nothing more: with no conversation to speak of, there is
-                # nothing to hand back to it later.
+                # Legacy clients use the session named by their key.
                 return Claim(key, prepared, root)
             session = prepared
             if prepared.spare:
-                # Only a session a launcher prepared and nobody has used is
-                # exchanged for the one this conversation is really on. A key
-                # that names anything else was pointed at deliberately -- the
-                # human handing out what `showme new` printed, or a client
-                # reconnecting to the session its own launch was given -- and
-                # the key is the capability, so it is taken at its word.
+                # Only replace an unused launcher session. Preserve explicit
+                # session keys and keys from earlier connections.
                 mine = self._session_of(agent, besides=prepared)
                 if mine is not None:
                     for pair in prepared.pairs:
@@ -261,20 +205,17 @@ class Broker:
                     self._release(prepared)
                     session = mine
             session.agent, session.stable = agent, stable
-            # A client reached it, so it is nobody's leftover: a session let
-            # go of and then claimed again is in use like any other.
+            # Reclaiming a released session restores its normal retention period.
             session.released = False
             session.touch()
             self.save()
             return Claim(key, session, root)
 
     def _session_of(self, agent: str, besides: Session) -> Session | None:
-        """The session this conversation already has in this tree.
+        """Find this conversation in the same root.
 
-        Rooted the same, because the root is what a key is clamped to and
-        where nvim runs: a conversation resumed somewhere else is starting
-        work on another tree and gets a session there, rather than quietly
-        keeping the reach its first launch had.
+        A different root requires a separate session because the root controls
+        file access and nvim's working directory.
         """
         return next(
             (
@@ -288,15 +229,10 @@ class Broker:
         )
 
     def _release(self, session: Session) -> None:
-        """Let go of a session the conversation that asked for it did not need.
+        """Rotate the spare session's keys and mark it for collection.
 
-        It loses its keys, so nothing can reach it, and the collector takes it
-        on its next pass. Not stopped here: a human can attach to a prepared
-        session by its root before the agent connects -- over ssh that is what
-        they are told to do -- and an attach that has started but not yet
-        drawn its nvim looks from here exactly like one that never happened.
-        The collector is the one caller that asks nvim rather than guessing,
-        and it already leaves a session with a terminal on it alone.
+        Leave nvim running: a terminal may already be attached or still
+        connecting. The collector checks for attached UIs after a grace period.
         """
         session.revoke()
         session.released = True
@@ -343,19 +279,11 @@ class Broker:
             return True
 
     def session_in(self, directory: str) -> Session | None:
-        """The session to attach to for a tree, most recently used first.
+        """Select a session for a directory.
 
-        A launcher prints the root rather than an id, because the id it made
-        is not always the one the agent ends up on. A tree with several
-        conversations working in it answers with the one most recently used,
-        and `showme ls` is how to reach any of the others.
-
-        The tree a human is standing in is the one they mean, so a session
-        rooted above them counts and one rooted below does not: `showme .`
-        deep inside a worktree finds the session working on it, while
-        `showme /` finds nothing rather than whatever ran last on the machine.
-        The nearest root wins, so a session on a worktree is not shadowed by
-        one on the checkout it sits in.
+        Prefer the nearest ancestor root, then a connected client, then recent
+        use. A collector probe refreshes last_seen for attached terminals, so
+        timestamps alone can select an older review over an active client.
         """
         wanted = Path(directory)
         if not wanted.is_absolute():
@@ -368,9 +296,7 @@ class Broker:
             if not session.released
             and (session.root.path == wanted or session.root.path in wanted.parents)
         ]
-        # A session an agent is connected to outranks one merely left open:
-        # the collector touches a session it finds a terminal on, so age alone
-        # would offer yesterday's abandoned review over today's work.
+        # Prefer connected clients over timestamps refreshed by UI probes.
         return max(
             rooted,
             key=lambda s: (
@@ -389,9 +315,7 @@ class Broker:
         """
         session = self.sessions.get(sid) or self.session_in(sid)
         if session is not None:
-            # Before anything else: a terminal takes a moment to start and
-            # attach its UI, and the collector must not take the session in
-            # between for want of one.
+            # Refresh expiry before awaiting nvim startup so collection cannot race attach.
             session.touch()
             await session.ensure()
             if background is not None:
@@ -399,40 +323,23 @@ class Broker:
         return session
 
     async def collect(self) -> None:
-        """Stop sessions nothing is using any more.
+        """Collect expired sessions with no client or attached terminal.
 
-        A conversation ends without telling anyone: the client goes away and
-        the session it was on stays, holding an editor and a set of frames
-        nobody will add to. Age alone is not enough to act on, because the
-        review may have outlived the agent on purpose and the human may still
-        be reading it -- so a session with a UI on it is in use whatever its
-        client did, and one with none is taken once its window has passed.
-
-        Asking nvim about its UIs is a round trip, and a hello can land inside
-        it, so what the decision was made from is read again under the lock
-        before anything is stopped. This runs on the broker's own loop: an
-        nvim that is merely busy must cost it a short wait and nothing else.
+        Recheck eligibility under the registry lock after probing nvim: a
+        client may connect during the probe. Leave unresponsive editors alive.
         """
         for session in await self._stale():
             try:
                 busy = await session.attached(timeout=PROBE_SECONDS)
             except NvimError:
-                # Busy is not gone, and silence is not permission to kill.
-                # Counted as contact so a wedged nvim is not probed again on
-                # every tick, each time for as long as the probe allows.
+                # Preserve unresponsive editors and defer the next probe.
                 session.touch()
                 continue
             if busy:
-                # Being read counts as being used, and the human closing that
-                # terminal is what starts the clock again.
+                # Refresh retention while a terminal is attached.
                 session.touch()
                 if session.released and not session.warned:
-                    # Someone is sitting in a session nothing can draw in
-                    # again. Saying nothing leaves them watching an editor
-                    # that cannot answer, with no way to tell that from an
-                    # agent that is merely quiet. Here rather than where it
-                    # was released: this is the one place that knows a human
-                    # is really there, and it is off the registry lock.
+                    # Tell the attached user how to reach the resumed conversation.
                     session.warned = True
                     session.warn(
                         f"this session was handed over -- "
@@ -463,9 +370,7 @@ class Broker:
             session.touch()
             return False
         if session.released:
-            # Nothing holds a key to it and nothing will, so it goes soon --
-            # but not before a terminal on its way in has had time to draw,
-            # and not so often that a busy nvim is probed on every tick.
+            # Allow time for a terminal to connect before collecting the spare.
             return age >= RELEASED_SECONDS
         return age >= (RESUMABLE_SECONDS if session.stable else LAUNCH_SECONDS)
 
@@ -577,11 +482,7 @@ async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _attached(session: Session) -> bool:
-    """Whether a terminal is on this session, for a listing.
-
-    An nvim too busy to answer is reported as having none: a listing waits for
-    nobody, and the collector is the caller that has to tell the two apart.
-    """
+    """Report UI attachment for listings; report probe failures as detached."""
     try:
         return await session.attached(timeout=PROBE_SECONDS)
     except NvimError:
@@ -633,13 +534,10 @@ class _Pushback:
 async def _hello(
     broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> tuple[Any, Claim | None]:
-    """Take the client's opening line and, if it names a session, answer it.
+    """Read the optional session claim before serving MCP.
 
-    A client launched for one session presents its key here instead of putting
-    it in every call, which is what lets a sandboxed one work without ever
-    being told a key. It names its conversation here too, and this is where a
-    session is finally given to one. A client that sends JSON-RPC straight
-    away gets its line handed back unread.
+    Clients without a hello send JSON-RPC directly; return their first line
+    to the MCP reader.
     """
     line = await reader.readline()
     try:
@@ -660,9 +558,7 @@ async def _hello(
     answer: dict[str, Any] = {"ok": claimed is not None}
     if claimed is not None:
         answer["session"] = claimed.session.sid
-        # Nothing about the connection says whether this client is sandboxed,
-        # and nothing here needs to: which key it presented is what it reaches,
-        # and is the only account of it worth keeping.
+        # Access is determined by the presented key.
         log.info(
             "session %s: client holds the %s key",
             claimed.session.sid,
@@ -682,9 +578,7 @@ async def _agent_client(
     if task is not None:
         broker.connections.add(task)
     session = None
-    # One finally for the whole connection: a client this never finished
-    # serving used to stay in `connections`, and a broker with a client it
-    # thinks is connected never idles out.
+    # Remove the connection on every exit path so failures cannot prevent idle exit.
     try:
         try:
             stream, claimed = await _hello(broker, reader, writer)
@@ -771,12 +665,7 @@ async def serve(stop: asyncio.Event | None = None) -> None:
 
 
 async def _until_idle(broker: Broker) -> None:
-    """Wait while the broker has work.
-
-    A session with no client is not idle: its review may be finished and
-    waiting for a human who has not arrived yet. The collector is what
-    eventually decides one is nobody's, and until it does the broker stays.
-    """
+    """Keep the broker running while clients or retained sessions exist."""
     idle_for = 0.0
     while True:
         with contextlib.suppress(TimeoutError):

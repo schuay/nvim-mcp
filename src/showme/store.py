@@ -27,13 +27,8 @@ from .paths import state_dir
 log = logging.getLogger(__name__)
 
 #: 2: notes live in frames.
-#: 3: a session belongs to a conversation rather than to a tree. State written
-#: before that has one session per tree, holding the frames of every
-#: conversation that ever worked there, and is set aside rather than carried
-#: over.
-#: 4: a session records the socket its nvim is listening on. A v3 file has a
-#: session that may have changed the key its socket was named after, leaving
-#: nothing to work the path out from.
+#: 3: sessions belong to conversations. Older state mixes conversations' frames.
+#: 4: save socket paths because key rotation prevents deriving them from keys.
 VERSION = 4
 
 
