@@ -221,11 +221,14 @@ class Session:
         """Return what `key` reaches here, or None if it is not one of ours.
 
         Both keys are compared without an early exit: the short id alone is
-        guessable, and the secret is what authorizes.
+        guessable, and the secret is what authorizes. Encoded first, because
+        `compare_digest` refuses a string with a character outside ASCII, and a
+        key arrives as whatever a client put in its JSON.
         """
-        if secrets.compare_digest(key, self.key):
+        offered = key.encode()
+        if secrets.compare_digest(offered, self.key.encode()):
             return self.root
-        if secrets.compare_digest(key, self.host_key):
+        if secrets.compare_digest(offered, self.host_key.encode()):
             return Anywhere(self.root.path)
         return None
 

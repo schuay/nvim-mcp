@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 
 import pytest
-from conftest import admin
+from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
 from showme import paths
@@ -110,3 +110,26 @@ async def test_the_host_key_is_nowhere_a_launcher_or_a_human_can_copy_it(
     ]
     await wire.close()
     assert made["key"] != host
+
+
+async def test_the_host_key_survives_a_broker_restart(
+    runtime: Path, repo: Path, tmp_path: Path
+) -> None:
+    outside = tmp_path / "notes.md"
+    outside.write_text("hello\n")
+    stop, task = await start_broker()
+    host, _ = await keys(repo)
+    await stop_broker(stop, task)
+
+    stop, task = await start_broker()
+    try:
+        # A splice replays the key it was handed when the broker it was talking
+        # to comes back, so a key minted again on restore would leave a running
+        # client with no session.
+        wire = await Wire.connect(paths.agent_socket(), key=host)
+        assert wire.hello["ok"] is True
+        payload = await call(wire, "show", host, locations=[{"file": str(outside)}])
+        assert payload["refused"] == []
+        await wire.close()
+    finally:
+        await stop_broker(stop, task)

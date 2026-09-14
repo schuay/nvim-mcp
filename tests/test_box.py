@@ -111,6 +111,18 @@ async def test_a_key_that_names_no_session_is_refused_at_connect(
     await wire.close()
 
 
+async def test_a_key_outside_ascii_is_refused_like_any_other(
+    running_broker: Path, repo: Path
+) -> None:
+    # A session has to exist for the comparison to happen at all, and the keys
+    # it is compared against are ASCII. What a client sends is not: this used
+    # to raise out of the handshake and leave it waiting on a dead connection.
+    await admin({"cmd": "new", "root": str(repo)})
+    wire = Wire(*await asyncio.open_unix_connection(str(paths.agent_socket())))
+    assert await wire.present("ke\u00fd") == {"ok": False, "error": "no such session"}
+    await wire.close()
+
+
 async def test_a_client_with_no_key_is_told_what_to_do(
     running_broker: Path, repo: Path
 ) -> None:
