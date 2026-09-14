@@ -7,7 +7,9 @@ This is the security boundary for a sandboxed client: it may read only inside
 the root its session was created for. Symlinks resolve before the check, so a
 link planted inside the root cannot point at a credential elsewhere, and a path
 outside it is refused before anything is stat'd, so the refusals cannot be read
-as an answer to whether a file elsewhere exists.
+as an answer to whether a file elsewhere exists. A refusal from inside the root
+names the path it was decided on, which is the only way a client that took the
+root for somewhere else can see where its relative paths are landing.
 
 The boundary binds a key rather than a session, which is why `Anywhere` is
 here too: a client that took its key over the admin socket runs as the human
@@ -60,11 +62,11 @@ class Root:
         except FileNotFoundError:
             # Distinct from a directory or a device. A client that mistook the
             # root spells a real file wrong, and needs to be told which it is.
-            raise Refused("no such file") from None
+            raise Refused(f"no such file: {resolved}") from None
         except OSError as e:
             raise Refused(f"cannot resolve: {e.strerror or e}") from e
         if not stat.S_ISREG(mode):
-            raise Refused("not a regular file")
+            raise Refused(f"not a regular file: {resolved}")
         return resolved
 
     def locate(self, raw: str) -> Path:

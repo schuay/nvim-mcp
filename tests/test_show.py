@@ -330,3 +330,29 @@ async def test_the_keys_walk_the_notes_and_wrap_at_the_ends(
     assert await nvim.lua(walk, up) == {"idx": 3, "file": "README.md"}
     await nvim.close()
     await wire.close()
+
+
+async def test_a_session_rooted_above_a_checkout_says_where_it_looked(
+    running_broker: Path, repo: Path, tmp_path: Path
+) -> None:
+    # The root a launcher picks is sometimes the directory holding several
+    # checkouts, where every path an agent knows is one directory short. It
+    # cannot spot that from a bare "no such file", so the refusal names what
+    # it stat'd and the envelope names what a relative path is taken against.
+    session = await new_session(tmp_path)
+    wire = await Wire.connect(paths.agent_socket())
+    payload = await show(
+        wire,
+        session["key"],
+        locations=[{"file": "src/main.c"}, {"file": "repo/src/main.c", "line": 2}],
+    )
+
+    assert payload["root"] == str(tmp_path)
+    assert [Path(p).name for p in payload["opened"]] == ["main.c"]
+    assert payload["refused"] == [
+        {"file": "src/main.c", "reason": f"no such file: {tmp_path / 'src/main.c'}"}
+    ]
+
+    read = await wire.call("read", {"session": session["key"], "what": "tabs"})
+    assert json.loads(read["content"][0]["text"])["root"] == str(tmp_path)
+    await wire.close()

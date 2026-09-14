@@ -124,6 +124,14 @@ class Envelope(Result):
     """
 
     session: str
+    root: str = Field(
+        description=(
+            "Where this session is rooted: what a relative path is taken "
+            "against, and the boundary if this key is a sandbox key. It is "
+            "not always the checkout you are working in -- a session rooted "
+            "above one needs the directory in the path too."
+        )
+    )
     attach_cmd: str = Field(
         description="The command the human runs to attach a terminal to this session"
     )

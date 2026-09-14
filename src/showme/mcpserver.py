@@ -146,9 +146,10 @@ def pending(session: Session) -> list[dict[str, Any]]:
     return [mark for mark in session.marks if not mark.get("acked")]
 
 
-def _envelope(session: Session, attached: bool) -> dict[str, Any]:
+def _envelope(session: Session, root: Root, attached: bool) -> dict[str, Any]:
     return {
         "session": session.sid,
+        "root": str(root.path),
         "attach_cmd": f"showme {session.sid}",
         "marks_pending": len(pending(session)),
         "attached": attached,
@@ -212,7 +213,7 @@ async def _show(session: Session, root: Root, request: ShowRequest) -> ShowResul
         )
 
     return ShowResult(
-        **_envelope(session, attached),
+        **_envelope(session, root, attached),
         frame=frame,
         popped=popped,
         opened_ui=opened_ui,
@@ -249,7 +250,7 @@ async def _read(session: Session, root: Root, request: ReadRequest) -> ReadResul
 
     result = await session.read(request.what, options)
     attached = await session.attached()
-    envelope = _envelope(session, attached)
+    envelope = _envelope(session, root, attached)
     if unknown:
         envelope["unknown_ack"] = unknown
 
@@ -280,7 +281,7 @@ async def _read(session: Session, root: Root, request: ReadRequest) -> ReadResul
         state = result.get("range")
         if not state:
             if not target.is_file():
-                raise Refused("no such file, and no buffer holding it")
+                raise Refused(f"no such file, and no buffer holding it: {target}")
             return ReadResult(**envelope, range=NotOpen(open=False, file=str(target)))
         span = Range.model_validate(state) if _within(root, state) else _outside(state)
         return ReadResult(**envelope, range=span)
