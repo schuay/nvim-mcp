@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """The tool contract: what a client may send and what it gets back.
@@ -38,7 +38,7 @@ class Result(BaseModel):
 SESSION_FIELD = Field(
     default=None,
     description=(
-        "Session key, as printed by `nv new`. Omit it when this client was "
+        "Session key, as printed by `showme new`. Omit it when this client was "
         "launched for one session and already holds its key."
     ),
 )

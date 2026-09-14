@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Frames: a stack of note sets, each with a letter, that both sides can name."""
@@ -14,15 +14,15 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.clamp import Refused
-from nvim_mcp.models import ShowResult
-from nvim_mcp.nvimrpc import NvimRPC
-from nvim_mcp.session import FRAME_LIMIT, Location, Session
+from showme import paths
+from showme.clamp import Refused
+from showme.models import ShowResult
+from showme.nvimrpc import NvimRPC
+from showme.session import FRAME_LIMIT, Location, Session
 
 pytestmark = pytest.mark.nvim
 
-NOTE_NS = "vim.api.nvim_create_namespace('nvim-mcp-show')"
+NOTE_NS = "vim.api.nvim_create_namespace('showme-show')"
 
 
 async def until(condition: Callable[[], bool], timeout: float = 2.0) -> None:

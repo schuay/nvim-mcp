@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Relay this process's stdin and stdout to the broker's socket, across
@@ -30,15 +30,15 @@ from collections.abc import Callable
 from typing import Any
 
 #: How long to keep trying the socket after a loss. A broker restarted by
-#: `nv` answers within a second; longer means nobody is restarting it.
-RECONNECT_WINDOW = float(os.environ.get("NVIM_MCP_RECONNECT_WINDOW", "5"))
+#: `showme` answers within a second; longer means nobody is restarting it.
+RECONNECT_WINDOW = float(os.environ.get("SHOWME_RECONNECT_WINDOW", "5"))
 CONNECTION_LOST = -32000
 
 #: The field naming the line a client sends before any JSON-RPC to say which
 #: session it was launched for, and the broker's answer to it. Connection
 #: setup, the same layer as the handshake replayed below: no tool is named and
 #: no argument is rewritten, so this side still holds no schema.
-HELLO = "nvim_mcp"
+HELLO = "showme"
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -100,11 +100,11 @@ class Splice:
     def run(self) -> int:
         if not self.connect(first=True):
             print(
-                f"nvim-mcp: cannot reach the broker at {self.socket_path}",
+                f"showme: cannot reach the broker at {self.socket_path}",
                 file=sys.stderr,
             )
             print(
-                "nvim-mcp: ask the human to run `nv new <root>` on the host.",
+                "showme: ask the human to run `showme new <root>` on the host.",
                 file=sys.stderr,
             )
             return 1
@@ -151,7 +151,7 @@ class Splice:
             if message is not None and "id" in message and method is not None:
                 self.answer(
                     message["id"],
-                    "nvim-mcp: the broker is not running; ask the human to run `nv` "
+                    "showme: the broker is not running; ask the human to run `showme` "
                     "on the host, then retry",
                 )
             return
@@ -164,7 +164,7 @@ class Splice:
             self.lost()
             if message is not None and "id" in message and method is not None:
                 self.pending.discard(message["id"])
-                self.answer(message["id"], "nvim-mcp: broker connection lost; retry")
+                self.answer(message["id"], "showme: broker connection lost; retry")
 
     def from_broker(self, line: bytes) -> None:
         message = _message(line)
@@ -182,7 +182,7 @@ class Splice:
         for request_id in sorted(self.pending, key=str):
             self.answer(
                 request_id,
-                "nvim-mcp: the broker restarted while handling this request; retry",
+                "showme: the broker restarted while handling this request; retry",
             )
         self.pending.clear()
 
@@ -261,7 +261,7 @@ class Splice:
                     answer = message[HELLO]
                     if not answer.get("ok"):
                         print(
-                            f"nvim-mcp: {answer.get('error', 'key refused')}",
+                            f"showme: {answer.get('error', 'key refused')}",
                             file=sys.stderr,
                         )
                         return False

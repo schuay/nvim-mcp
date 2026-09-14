@@ -1,22 +1,22 @@
-# nvim-mcp
+# showme
 
-nvim-mcp gives a coding agent and the human reviewing its work one shared view
+showme gives a coding agent and the human reviewing its work one shared view
 of the code. The agent opens the locations it is talking about and annotates
 them at the line; the human marks a range in the editor and asks about it.
 
 ```sh
-uv tool install nvim-mcp
-nv install claude    # or codex, gemini, opencode -- shows the change and asks
+uv tool install showme-mcp
+showme install claude # or codex, gemini, opencode -- shows the change and asks
 ```
 
 Then ask your agent to show you something. It takes a session for the
 directory it was started in, nvim starts with the first thing it shows, and a
-window opens for it if `NVIM_MCP_TERMINAL` names your terminal. There is
+window opens for it if `SHOWME_TERMINAL` names your terminal. There is
 nothing to start and no key to paste.
 
-`nv new <root>` still makes a session by hand, `nv ls` lists them, and `nv 3`
-attaches a terminal to one. A sandboxed agent cannot reach that side at all,
-so its launcher passes it a key instead; see below.
+`showme new <root>` still makes a session by hand, `showme ls` lists them, and
+`showme 3` attaches a terminal to one. A sandboxed agent cannot reach that side
+at all, so its launcher passes it a key instead; see below.
 
 The agent reaches the same session through MCP and puts code in front of you
 instead of quoting line numbers at you.
@@ -52,7 +52,7 @@ On your side:
 - `:q` is safe. The broker holds the record of what is shown and starts nvim
   again, with the notes on the lines your edits moved them to.
 
-Set `NVIM_MCP_TERMINAL` in the shell you start sessions from, to a terminal
+Set `SHOWME_TERMINAL` in the shell you start sessions from, to a terminal
 and whatever it needs before a command -- `ghostty -e`, `kitty`, `alacritty
 -e` -- and a session gets a window of its own the first time an agent shows
 something to it while nothing is on screen. One window per nvim, so closing it
@@ -82,9 +82,9 @@ handshake, so the client never notices. The broker in turn survives its own
 restart by adopting the nvim it left running, with your unsaved edits in it.
 
 A broker holds `session.lua` and its own code from the moment it started, so
-after changing either, `nv restart-broker` puts a new one on the same sockets
-and hands it the sessions. Changed Lua reaches a session when its nvim next
-starts, which `:q` does.
+after changing either, `showme restart-broker` puts a new one on the same
+sockets and hands it the sessions. Changed Lua reaches a session when its nvim
+next starts, which `:q` does.
 
 ## What the broker will not do
 
@@ -95,7 +95,7 @@ starts, which `:q` does.
 - No agent-supplied string reaches an Ex command line. A file named
   ``a`touch /tmp/x`.c`` runs the shell through `:edit` and through
   `nvim_cmd`'s structured arguments alike, so paths are opened with `bufadd`.
-- The session key is the capability. `nv new` sets the root on the host and
+- The session key is the capability. `showme new` sets the root on the host and
   prints an unguessable key; handing that key to an agent is what lets it use
   the session.
 
@@ -105,7 +105,7 @@ The MCP client can run confined. The box needs one mount, the directory holding
 the agent socket, read-only:
 
 ```
-~/.local/share/nvim-mcp
+~/.local/share/showme
 ```
 
 `connect` works through a read-only mount and `bind` does not, so the box
@@ -113,18 +113,18 @@ reaches the broker on the host, and the broker a client starts when nothing
 answers dies in there instead of serving a second, empty set of sessions under
 the key you pasted. Nothing else has to go in, and the nvim listen sockets must
 not: raw nvim RPC runs arbitrary Lua, so one of those sockets hands over the
-host. `nv mcp` is the command on both sides. The directory also holds a
-standalone copy of the relay, for a box without nvim-mcp installed:
+host. `showme mcp` is the command on both sides. The directory also holds a
+standalone copy of the relay, for a box without showme installed:
 
 ```sh
-python3 ~/.local/share/nvim-mcp/splice.py ~/.local/share/nvim-mcp/agent.sock
+python3 ~/.local/share/showme/splice.py ~/.local/share/showme/agent.sock
 ```
 
 ## Install
 
 ```sh
-uv tool install .                                # nv on PATH
-claude mcp add --scope user nvim -- nv mcp       # or your client's equivalent
+uv tool install .                                 # showme on PATH
+claude mcp add --scope user showme -- showme mcp  # or your client's equivalent
 ```
 
 For development:
@@ -135,5 +135,5 @@ uv sync
 .venv/bin/python -m pytest -q      # most tests drive a real nvim
 ```
 
-State lives under `~/.local/state/nvim-mcp`: the session record, and logs for
+State lives under `~/.local/state/showme`: the session record, and logs for
 the broker and each session's nvim.

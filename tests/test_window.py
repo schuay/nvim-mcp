@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Giving a session a window when an agent shows to one nobody is watching."""
@@ -12,7 +12,7 @@ from pathlib import Path
 
 import pytest
 
-from nvim_mcp.session import Location, Session
+from showme.session import Location, Session
 
 pytestmark = pytest.mark.nvim
 
@@ -32,7 +32,7 @@ def terminal(tmp_path: Path) -> tuple[Path, Path]:
 
 
 def env_with(script: Path, **extra: str) -> dict[str, str]:
-    return {**os.environ, "NVIM_MCP_TERMINAL": str(script), **extra}
+    return {**os.environ, "SHOWME_TERMINAL": str(script), **extra}
 
 
 async def recorded(log: Path, timeout: float = 5.0) -> list[str]:
@@ -70,7 +70,7 @@ async def test_a_show_to_an_empty_screen_opens_a_window_once(
     result = await shown(session, repo)
     assert result["opened_ui"] is True
     # The terminal runs nvim against this session's socket directly, so there
-    # is no second question to the admin socket and no `nv` to find.
+    # is no second question to the admin socket and no `showme` to find.
     opened = await recorded(log)
     assert opened == [f"nvim --remote-ui --server {session.socket}"]
 

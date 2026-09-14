@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Serve MCP to one client connection.
@@ -112,7 +112,7 @@ def pending(session: Session) -> list[dict[str, Any]]:
 def _envelope(session: Session, attached: bool) -> dict[str, Any]:
     return {
         "session": session.sid,
-        "attach_cmd": f"nv {session.sid}",
+        "attach_cmd": f"showme {session.sid}",
         "marks_pending": len(pending(session)),
         "attached": attached,
     }
@@ -299,11 +299,11 @@ def build(
         session = lookup(key) if key else None
         if session is None:
             return _error(
-                "no such session. Ask the human to run `nv new <root>` and "
+                "no such session. Ask the human to run `showme new <root>` and "
                 "paste the key it prints."
                 if key
                 else "no session for this client. It was started somewhere "
-                "without one -- ask the human to run `nv new <root>` in the "
+                "without one -- ask the human to run `showme new <root>` in the "
                 "directory they want you looking at, and paste the key."
             )
         try:
@@ -325,7 +325,7 @@ def build(
             structured_content=document,
         )
 
-    return Server("nvim", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
+    return Server("showme", on_list_tools=on_list_tools, on_call_tool=on_call_tool)
 
 
 def _error(message: str) -> types.CallToolResult:

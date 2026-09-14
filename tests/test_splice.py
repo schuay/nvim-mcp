@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """The splice keeps the client's MCP session across broker restarts."""
@@ -19,7 +19,7 @@ from typing import Any
 import pytest
 from conftest import start_broker, stop_broker
 
-from nvim_mcp import paths, splice
+from showme import paths, splice
 
 
 class Client:
@@ -37,7 +37,7 @@ class Client:
             str(socket_path),
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            env={**os.environ, "NVIM_MCP_RECONNECT_WINDOW": str(window)},
+            env={**os.environ, "SHOWME_RECONNECT_WINDOW": str(window)},
         )
         return cls(process)
 
@@ -195,7 +195,7 @@ async def test_a_broker_that_stays_away_answers_with_an_error_and_the_splice_liv
     request_id = await client.request("tools/list")
     reply = await client.receive()
     assert reply["id"] == request_id
-    assert "run `nv`" in reply["error"]["message"]
+    assert "run `showme`" in reply["error"]["message"]
     assert asyncio.get_running_loop().time() - started >= 0.5
     assert client.process.returncode is None, "the splice gave up on the client"
     assert await client.close() == 0
@@ -279,7 +279,7 @@ def test_a_host_client_takes_the_session_rooted_where_it_started(
 ) -> None:
     import argparse
 
-    from nvim_mcp import cli
+    from showme import cli
 
     asked: dict[str, Any] = {}
     captured: dict[str, Any] = {}
@@ -316,7 +316,7 @@ def test_a_sandboxed_client_asks_for_no_broker_and_no_session(
     then failed."""
     import argparse
 
-    from nvim_mcp import cli
+    from showme import cli
 
     # Read-only is what a box has, and what this asks about.
     paths.agent_dir().chmod(0o500)

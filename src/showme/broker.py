@@ -1,12 +1,12 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Run the host-side daemon that owns every nvim session.
 
 One broker per user, held by a lock file. It listens on two sockets: an admin
-socket for `nv`, which creates and kills sessions, and an agent socket carrying
-MCP. Only the agent socket is meant to be reachable from a sandbox, so session
-administration stays off the surface a sandboxed client can see.
+socket for `showme`, which creates and kills sessions, and an agent socket
+carrying MCP. Only the agent socket is meant to be reachable from a sandbox, so
+session administration stays off the surface a sandboxed client can see.
 """
 
 from __future__ import annotations
@@ -33,7 +33,7 @@ IDLE_EXIT_SECONDS = 15 * 60
 #: How long a line a client may send. One tool call is one line, and the
 #: contract accepts 50 locations carrying 2000 characters of note each, which
 #: is several times asyncio's 64 KiB default: a call the tools would have
-#: accepted arrived as a closed connection instead. `nv` sends the whole
+#: accepted arrived as a closed connection instead. `showme` sends the whole
 #: environment of the shell it ran in, which is smaller but not by much.
 LINE_LIMIT = 4 * 1024 * 1024
 
@@ -41,16 +41,17 @@ LINE_LIMIT = 4 * 1024 * 1024
 def _guard_root(root: Path) -> None:
     """Refuse a root a launcher should never have picked on its own.
 
-    `nv new` takes what the human typed. `nv ensure` takes the directory they
-    happened to be standing in, and the session root is a second access list:
-    an agent reads everything under it through the broker, whatever its
-    sandbox mounts.
+    `showme new` takes what the human typed. `showme ensure` takes the
+    directory they happened to be standing in, and the session root is a second
+    access list: an agent reads everything under it through the broker,
+    whatever its sandbox mounts.
 
     It catches a home directory and a tree with no repository at or above it,
     which is usually a parent holding several. It does not catch a repository
     that contains repositories -- a checkout with worktrees or vendored
     subrepos under it -- because nothing here distinguishes that from a
-    project with submodules. For those, the root `nv box` prints is the check.
+    project with submodules. For those, the root `showme box` prints is the
+    check.
     """
     home = Path.home()
     if root == home or root in home.parents:
@@ -60,7 +61,9 @@ def _guard_root(root: Path) -> None:
             return
         if directory == home:
             break
-    raise Refused(f"no repository at or above {root}; `nv new {root}` if you mean it")
+    raise Refused(
+        f"no repository at or above {root}; `showme new {root}` if you mean it"
+    )
 
 
 class Broker:
@@ -73,7 +76,7 @@ class Broker:
         #: startup, and two creations that pick an id before either has
         #: registered would pick the same one.
         self._lock = asyncio.Lock()
-        #: Set to end this broker. `nv restart-broker` uses it so a broker
+        #: Set to end this broker. `showme restart-broker` uses it so a broker
         #: carrying stale code goes away the way one that idles out does:
         #: state saved, sessions detached, nvim left running for the next.
         self.stop = asyncio.Event()
@@ -204,7 +207,7 @@ class Broker:
 async def _admin_client(
     broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
 ) -> None:
-    """Answer one `nv` command.
+    """Answer one `showme` command.
 
     A small JSON line protocol rather than MCP: these are host-only operations
     that must stay off the agent surface.
@@ -462,7 +465,7 @@ async def _until_idle(broker: Broker) -> None:
 
 
 def main() -> int:
-    logging.basicConfig(level=logging.INFO, format="nvim-mcp: %(message)s")
+    logging.basicConfig(level=logging.INFO, format="showme: %(message)s")
     with contextlib.suppress(KeyboardInterrupt):
         asyncio.run(serve())
     return 0

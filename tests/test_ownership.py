@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """The session is the record; nvim reports positions and questions into it."""
@@ -11,12 +11,12 @@ from pathlib import Path
 
 import pytest
 
-from nvim_mcp.nvimrpc import NvimRPC
-from nvim_mcp.session import MARK_TEXT_LIMIT, Location, Note, Session
+from showme.nvimrpc import NvimRPC
+from showme.session import MARK_TEXT_LIMIT, Location, Note, Session
 
 pytestmark = pytest.mark.nvim
 
-NOTE_NS = "vim.api.nvim_create_namespace('nvim-mcp-show')"
+NOTE_NS = "vim.api.nvim_create_namespace('showme-show')"
 
 
 async def until(condition: Callable[[], bool], timeout: float = 2.0) -> None:
@@ -101,7 +101,7 @@ async def test_positions_survive_the_human_quitting(
 
     await session.ensure()
     again = await NvimRPC.connect(session.socket)
-    assert await again.lua("return NvimMcp.frames[1].notes[1].line") == 4
+    assert await again.lua("return ShowMe.frames[1].notes[1].line") == 4
     assert await decoration_rows(again) == [3, 3]
     await again.close()
 
@@ -134,14 +134,14 @@ async def test_a_question_survives_the_human_quitting_at_once(
 async def test_a_question_asked_while_the_broker_is_away_waits_for_it(
     session: Session, human: NvimRPC
 ) -> None:
-    await human.lua("NvimMcp.chan = 9999")
+    await human.lua("ShowMe.chan = 9999")
     await human.request("nvim_command", "3Ask later")
-    assert await human.lua("return #NvimMcp.pending") == 1
+    assert await human.lua("return #ShowMe.pending") == 1
     assert session.marks == []
 
     await session.read("marks", {})
     assert [m["note"] for m in session.marks] == ["later"]
-    assert await human.lua("return #NvimMcp.pending") == 0
+    assert await human.lua("return #ShowMe.pending") == 0
     await session.read("marks", {})
     assert len(session.marks) == 1, "delivered twice"
 
@@ -149,7 +149,7 @@ async def test_a_question_asked_while_the_broker_is_away_waits_for_it(
 async def test_nvim_still_exits_when_the_broker_is_away(
     session: Session, human: NvimRPC
 ) -> None:
-    await human.lua("NvimMcp.chan = 9999")
+    await human.lua("ShowMe.chan = 9999")
     process = session.editor.process
     assert process is not None
     await human.notify("nvim_command", "qall!")

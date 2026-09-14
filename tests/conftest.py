@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -13,7 +13,7 @@ from pathlib import Path
 
 import pytest
 
-from nvim_mcp import broker, paths
+from showme import broker, paths
 
 
 @pytest.fixture
@@ -35,7 +35,7 @@ def runtime(monkeypatch: pytest.MonkeyPatch) -> Iterator[Path]:
     base = Path(tempfile.mkdtemp(prefix="nvmcp-", dir="/tmp"))
     monkeypatch.setenv("XDG_RUNTIME_DIR", str(base / "run"))
     monkeypatch.setenv("XDG_STATE_HOME", str(base / "state"))
-    monkeypatch.setenv("NVIM_MCP_AGENT_DIR", str(base / "agent"))
+    monkeypatch.setenv("SHOWME_AGENT_DIR", str(base / "agent"))
     yield base
     # A stopped broker leaves its nvims running on purpose. Nothing adopts
     # them after the test, so end them by the socket path only they listen on.

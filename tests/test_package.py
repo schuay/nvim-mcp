@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -8,7 +8,7 @@ from pathlib import Path
 
 from hatchling.builders.wheel import WheelBuilder
 
-from nvim_mcp.nvimrpc import lua_value
+from showme.nvimrpc import lua_value
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -19,8 +19,8 @@ def test_the_wheel_ships_the_lua(tmp_path: Path) -> None:
     (wheel,) = WheelBuilder(str(ROOT)).build(directory=str(tmp_path))
     with zipfile.ZipFile(wheel) as archive:
         names = archive.namelist()
-        assert "nvim_mcp/session.lua" in names
-        assert archive.read("nvim_mcp/session.lua").startswith(b"-- Copyright")
+        assert "showme/session.lua" in names
+        assert archive.read("showme/session.lua").startswith(b"-- Copyright")
 
 
 def test_lua_values_omit_absent_fields() -> None:

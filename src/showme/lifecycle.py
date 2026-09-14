@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Start, adopt, and stop the nvim behind a session.
@@ -11,7 +11,7 @@ caller's environment, so it outlives the broker and finds the language
 servers and display the human's shell would.
 
 Stopping is deliberate. A broker going away detaches and leaves nvim running
-for the next broker to adopt; only `nv kill` stops one.
+for the next broker to adopt; only `showme kill` stops one.
 
 A session nobody is watching can also be given a window here. That is an
 administrative act, so it is not in the tool list: an agent cannot ask for it,
@@ -42,7 +42,7 @@ Outcome = Literal["alive", "adopted", "started", "absent"]
 #: it needs before a command -- `ghostty -e`, `kitty`, `alacritty -e` -- and a
 #: window opens when an agent shows something to a session nobody is watching.
 #: Unset means no window, which is also the answer over ssh.
-TERMINAL = "NVIM_MCP_TERMINAL"
+TERMINAL = "SHOWME_TERMINAL"
 
 
 class Editor:
@@ -157,9 +157,9 @@ class Editor:
     def open_window(self) -> bool:
         """Put this session on the human's screen, at most once per nvim.
 
-        The terminal runs nvim directly rather than `nv`: the socket is known
-        here, so there is nothing to ask the admin socket for, and which `nv`
-        is on a path stops mattering.
+        The terminal runs nvim directly rather than `showme`: the socket is
+        known here, so there is nothing to ask the admin socket for, and which
+        `showme` is on a path stops mattering.
         """
         env = self.env or {}
         command = shlex.split(env.get(TERMINAL, ""))

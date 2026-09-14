@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from nvim_mcp.clamp import Refused, Root
+from showme.clamp import Refused, Root
 
 
 def test_resolves_a_path_inside_the_root(repo: Path) -> None:

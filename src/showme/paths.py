@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Locate the broker's sockets, lock, and state.
@@ -37,17 +37,17 @@ def _mkdir(path: Path) -> Path:
 
 def runtime_dir() -> Path:
     """Return the private directory for sockets that no sandbox may reach."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/nvim-mcp-{os.getuid()}"  # noqa: S108
-    return _mkdir(Path(base) / "nvim-mcp")
+    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/showme-{os.getuid()}"  # noqa: S108
+    return _mkdir(Path(base) / "showme")
 
 
 def agent_dir() -> Path:
     """Return the directory a sandbox binds read-only to reach the broker."""
-    base = os.environ.get("NVIM_MCP_AGENT_DIR")
+    base = os.environ.get("SHOWME_AGENT_DIR")
     if base:
         return _mkdir(Path(base))
     share = os.environ.get("XDG_DATA_HOME") or Path.home() / ".local" / "share"
-    return _mkdir(Path(share) / "nvim-mcp")
+    return _mkdir(Path(share) / "showme")
 
 
 def box_dir() -> Path:
@@ -60,7 +60,7 @@ def box_dir() -> Path:
     read-only.
     """
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    return Path(base) / "nvim-mcp-box"
+    return Path(base) / "showme-box"
 
 
 def sandboxed() -> bool:
@@ -94,7 +94,7 @@ def box_key() -> str | None:
 def state_dir() -> Path:
     """Return the directory holding session state that outlives the broker."""
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
-    return _mkdir(Path(base) / "nvim-mcp")
+    return _mkdir(Path(base) / "showme")
 
 
 def admin_socket() -> Path:

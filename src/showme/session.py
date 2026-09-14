@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Own one headless nvim and apply agent requests to it.
@@ -47,9 +47,9 @@ MARK_TEXT_LIMIT = 16 * 1024
 #: module rather than embedded in it so it reads as Lua.
 SESSION_INIT = resources.files(__package__).joinpath("session.lua").read_text()
 
-SHOW = "return NvimMcp.show(...)"
-READ = "return NvimMcp.read(...)"
-SYNC = "return NvimMcp.sync()"
+SHOW = "return ShowMe.show(...)"
+READ = "return ShowMe.read(...)"
+SYNC = "return ShowMe.sync()"
 
 
 def one_line(text: str) -> str:
@@ -152,7 +152,7 @@ class Session:
     #: 'light' or 'dark', taken from the human's terminal. A headless nvim
     #: cannot detect it.
     background: str | None = None
-    #: The environment nvim runs with: the shell that ran `nv new`, so the
+    #: The environment nvim runs with: the shell that ran `showme new`, so the
     #: session sees the same PATH and display the human does. Kept for the
     #: respawn after `:q`.
     env: dict[str, str] | None = None
@@ -294,7 +294,7 @@ class Session:
             await self._setup(None)
             assert self.rpc is not None
             self._absorb(await self.rpc.lua(SYNC))
-            shown = await self.rpc.lua("return NvimMcp.ids()")
+            shown = await self.rpc.lua("return ShowMe.ids()")
             if list(shown or []) != [note.id for note in self.notes]:
                 await self._draw(focus=False)
 
@@ -454,7 +454,7 @@ class Session:
     async def _tell_human(self, message: str) -> None:
         assert self.rpc is not None
         with contextlib.suppress(Exception):
-            await self.rpc.lua("vim.notify(...)", f"nvim-mcp: {message}")
+            await self.rpc.lua("vim.notify(...)", f"showme: {message}")
 
     async def read(self, what: str, options: dict[str, Any]) -> dict[str, Any]:
         async def run() -> Any:
@@ -485,7 +485,7 @@ class Session:
         return bool(marks)
 
     def _on_notification(self, method: str, params: list[Any]) -> None:
-        if method != "nvim-mcp" or not params:
+        if method != "showme" or not params:
             return
         if params[0] == "ask":
             self._absorb({"marks": [params[1]]})
@@ -497,7 +497,7 @@ class Session:
             task.add_done_callback(self._tasks.discard)
 
     def _on_request(self, method: str, params: list[Any]) -> Any:
-        if method == "nvim-mcp" and params and params[0] == "sync":
+        if method == "showme" and params and params[0] == "sync":
             self._absorb(params[1])
             self._changed()
             return True
@@ -510,8 +510,9 @@ class Session:
     async def attached(self) -> bool:
         """Report whether a UI is on this session's nvim.
 
-        A dead nvim has no UI. Asking must not start one: `nv ls` asks about
-        every session, and listing them is not a reason to bring them back.
+        A dead nvim has no UI. Asking must not start one: `showme ls` asks
+        about every session, and listing them is not a reason to bring them
+        back.
         """
         async with self._lock:
             if not self.alive:

@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.models import ReadResult, ShowResult
+from showme import paths
+from showme.models import ReadResult, ShowResult
 
 pytestmark = pytest.mark.nvim
 

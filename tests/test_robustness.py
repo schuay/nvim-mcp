@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -13,10 +13,10 @@ from pathlib import Path
 import msgpack
 import pytest
 
-from nvim_mcp import paths, splice
-from nvim_mcp.clamp import Refused, Root
-from nvim_mcp.nvimrpc import NvimError, NvimRPC
-from nvim_mcp.session import NOTE_LIMIT, one_line
+from showme import paths, splice
+from showme.clamp import Refused, Root
+from showme.nvimrpc import NvimError, NvimRPC
+from showme.session import NOTE_LIMIT, one_line
 
 
 @pytest.fixture
@@ -41,7 +41,7 @@ async def test_a_request_from_nvim_is_answered_on_the_read_loop() -> None:
     replies: asyncio.Queue[list] = asyncio.Queue()
 
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        writer.write(msgpack.packb([0, 7, "nvim-mcp", ["sync", {}]]))
+        writer.write(msgpack.packb([0, 7, "showme", ["sync", {}]]))
         writer.write(msgpack.packb([0, 8, "other", []]))
         unpacker = msgpack.Unpacker(raw=False)
         while (chunk := await reader.read(4096)) and replies.qsize() < 2:
@@ -52,7 +52,7 @@ async def test_a_request_from_nvim_is_answered_on_the_read_loop() -> None:
 
     server = await asyncio.start_unix_server(serve, path=str(directory / "s.sock"))
     rpc = await NvimRPC.connect(directory / "s.sock")
-    rpc.on_request = lambda method, params: params[0] if method == "nvim-mcp" else 1 / 0
+    rpc.on_request = lambda method, params: params[0] if method == "showme" else 1 / 0
     assert await replies.get() == [1, 7, None, "sync"]
     assert (await replies.get())[:3] == [1, 8, "division by zero"]
     await rpc.close()
@@ -111,8 +111,8 @@ def test_a_long_note_is_truncated() -> None:
 
 def test_a_loose_directory_is_tightened(monkeypatch: pytest.MonkeyPatch) -> None:
     base = Path(tempfile.mkdtemp(prefix="nvmcp-", dir="/tmp"))
-    loose = base / "nvim-mcp"
+    loose = base / "showme"
     loose.mkdir(mode=0o777)
-    monkeypatch.setenv("NVIM_MCP_AGENT_DIR", str(loose))
+    monkeypatch.setenv("SHOWME_AGENT_DIR", str(loose))
     assert paths.agent_dir() == loose
     assert stat.S_IMODE(loose.lstat().st_mode) == 0o700

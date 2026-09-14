@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """A broker comes and goes; the session's nvim, and the human in it, stay."""
@@ -16,9 +16,9 @@ import pytest
 from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
-from nvim_mcp import paths, store
-from nvim_mcp.nvimrpc import NvimRPC
-from nvim_mcp.session import Location, Session
+from showme import paths, store
+from showme.nvimrpc import NvimRPC
+from showme.session import Location, Session
 
 pytestmark = pytest.mark.nvim
 
@@ -86,7 +86,7 @@ async def test_a_crashed_broker_is_replaced_without_losing_the_editor(
     # A real process, so it can be killed the way a crash kills it, with no
     # chance to hand anything over.
     broker = await asyncio.create_subprocess_exec(
-        sys.executable, "-m", "nvim_mcp.broker", env=dict(os.environ)
+        sys.executable, "-m", "showme.broker", env=dict(os.environ)
     )
     for _ in range(500):
         if paths.agent_socket().exists() and paths.admin_socket().exists():
@@ -143,10 +143,10 @@ async def test_attach_starts_a_session_whose_nvim_is_gone(
 async def test_nvim_runs_with_the_callers_environment(
     runtime: Path, repo: Path
 ) -> None:
-    env = dict(os.environ, NVIM_MCP_PROBE="from the shell")
+    env = dict(os.environ, SHOWME_PROBE="from the shell")
     session = Session.create("1", repo, clean=True, env=env)
     await session.ensure()
-    assert await session.rpc.lua("return vim.env.NVIM_MCP_PROBE") == "from the shell"
+    assert await session.rpc.lua("return vim.env.SHOWME_PROBE") == "from the shell"
 
     # And again after :q, which respawns from the record rather than from
     # whatever the broker happens to have.
@@ -158,7 +158,7 @@ async def test_nvim_runs_with_the_callers_environment(
     await process.wait()
     restored = Session.restore(session.state())
     await restored.ensure()
-    assert await restored.rpc.lua("return vim.env.NVIM_MCP_PROBE") == "from the shell"
+    assert await restored.rpc.lua("return vim.env.SHOWME_PROBE") == "from the shell"
     await restored.close()
 
 

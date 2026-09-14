@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """A minimal MCP client for tests: JSON-RPC lines over the agent socket.
@@ -14,7 +14,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from nvim_mcp import broker, splice
+from showme import broker, splice
 
 
 class Wire:

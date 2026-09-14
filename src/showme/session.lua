@@ -1,4 +1,4 @@
--- Copyright 2026 The nvim-mcp developers
+-- Copyright 2026 The showme developers
 -- SPDX-License-Identifier: MIT
 
 -- The session's half inside nvim. Run once by the broker after connecting.
@@ -11,10 +11,10 @@
 
 local opts, frames = ...
 local background = opts.background
-local group = vim.api.nvim_create_augroup('nvim-mcp', { clear = true })
+local group = vim.api.nvim_create_augroup('showme', { clear = true })
 
-_G.NvimMcp = _G.NvimMcp or {}
-local M = _G.NvimMcp
+_G.ShowMe = _G.ShowMe or {}
+local M = _G.ShowMe
 --- The broker's channel. Human events go straight to it while it is open.
 M.chan = opts.chan
 M.text_limit = opts.text_limit
@@ -34,9 +34,9 @@ M.pending = M.pending or {}
 --- human writing a batch of replies can see which are still waiting.
 M.asks = M.asks or {}
 M.ask_seq = M.ask_seq or 0
-M.ns = vim.api.nvim_create_namespace('nvim-mcp-show')
-M.anchor_ns = vim.api.nvim_create_namespace('nvim-mcp-anchor')
-M.ask_ns = vim.api.nvim_create_namespace('nvim-mcp-ask')
+M.ns = vim.api.nvim_create_namespace('showme-show')
+M.anchor_ns = vim.api.nvim_create_namespace('showme-anchor')
+M.ask_ns = vim.api.nvim_create_namespace('showme-ask')
 
 
 local function options()
@@ -94,7 +94,7 @@ end
 --
 -- The derived groups are force-set so a colourscheme change re-colours them,
 -- while the groups the extmarks name only link to them by default, which keeps
--- a human's own NvimMcpNote or NvimMcpShow across colourscheme changes.
+-- a human's own ShowMeNote or ShowMeShow across colourscheme changes.
 local function styles()
   local info = vim.api.nvim_get_hl(0, { name = 'DiagnosticInfo', link = false })
   local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
@@ -129,12 +129,12 @@ local function styles()
   else
     note.link = 'DiagnosticInfo'
   end
-  vim.api.nvim_set_hl(0, 'NvimMcpNoteDefault', note)
-  vim.api.nvim_set_hl(0, 'NvimMcpShowDefault', { link = 'Visual' })
-  vim.api.nvim_set_hl(0, 'NvimMcpAskDefault', { link = 'DiagnosticWarn' })
-  vim.api.nvim_set_hl(0, 'NvimMcpNote', { link = 'NvimMcpNoteDefault', default = true })
-  vim.api.nvim_set_hl(0, 'NvimMcpShow', { link = 'NvimMcpShowDefault', default = true })
-  vim.api.nvim_set_hl(0, 'NvimMcpAsk', { link = 'NvimMcpAskDefault', default = true })
+  vim.api.nvim_set_hl(0, 'ShowMeNoteDefault', note)
+  vim.api.nvim_set_hl(0, 'ShowMeShowDefault', { link = 'Visual' })
+  vim.api.nvim_set_hl(0, 'ShowMeAskDefault', { link = 'DiagnosticWarn' })
+  vim.api.nvim_set_hl(0, 'ShowMeNote', { link = 'ShowMeNoteDefault', default = true })
+  vim.api.nvim_set_hl(0, 'ShowMeShow', { link = 'ShowMeShowDefault', default = true })
+  vim.api.nvim_set_hl(0, 'ShowMeAsk', { link = 'ShowMeAskDefault', default = true })
 end
 
 -- Virtual lines ignore 'wrap' and this nvim offers no wrapping overflow mode,
@@ -274,7 +274,7 @@ function M.render(buf)
           end_col = #(vim.api.nvim_buf_get_lines(buf, last - 1, last, true)[1] or '')
         end
         vim.api.nvim_buf_set_extmark(buf, M.ns, first - 1, 0, {
-          end_row = end_row, end_col = end_col, hl_group = 'NvimMcpShow', hl_eol = true,
+          end_row = end_row, end_col = end_col, hl_group = 'ShowMeShow', hl_eol = true,
         })
       end
       if note.text and note.text ~= '' then
@@ -285,7 +285,7 @@ function M.render(buf)
         for _, text in ipairs(fold(note.text, textwidth(buf), note.id .. '  ')) do
           -- An empty final chunk extends the highlight to the end of the screen
           -- line, so the note reads as a band rather than coloured text.
-          table.insert(bands[first], { { text, 'NvimMcpNote' }, { '', 'NvimMcpNote' } })
+          table.insert(bands[first], { { text, 'ShowMeNote' }, { '', 'ShowMeNote' } })
         end
       end
     end
@@ -542,7 +542,7 @@ vim.api.nvim_create_autocmd('BufUnload', {
 -- broker is away there is nobody to wait for.
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
-  callback = function() pcall(vim.rpcrequest, M.chan, 'nvim-mcp', 'sync', M.sync()) end,
+  callback = function() pcall(vim.rpcrequest, M.chan, 'showme', 'sync', M.sync()) end,
 })
 
 -- Answer the file-changed prompt ourselves. Left to nvim it blocks the RPC
@@ -557,8 +557,8 @@ vim.api.nvim_create_autocmd('FileChangedShell', {
 -- Frames are the broker's to change. The human's pop goes to it as a request
 -- and comes back as a redraw; with the broker away there is nothing to change.
 local function request_pop(letter)
-  if not pcall(vim.rpcnotify, M.chan, 'nvim-mcp', 'pop', letter) then
-    vim.notify('nvim-mcp: broker away, cannot pop')
+  if not pcall(vim.rpcnotify, M.chan, 'showme', 'pop', letter) then
+    vim.notify('showme: broker away, cannot pop')
   end
 end
 vim.api.nvim_create_user_command('AgentPop', function() request_pop(nil) end,
@@ -573,7 +573,7 @@ vim.api.nvim_create_user_command('AgentDrop', function(o) request_pop(o.args) en
 local function walk(step, wrap)
   return function()
     if vim.fn.getqflist({ size = 0 }).size == 0 then
-      vim.notify('nvim-mcp: no notes')
+      vim.notify('showme: no notes')
     elseif not pcall(vim.cmd, step) then
       vim.cmd(wrap)
     end
@@ -607,17 +607,17 @@ vim.api.nvim_create_user_command('Ask', function(o)
   }
   -- Straight to the broker while its channel is open, so the question is
   -- recorded before this nvim can be quit. Otherwise held for the next sync.
-  local delivered = pcall(vim.rpcnotify, M.chan, 'nvim-mcp', 'ask', mark)
+  local delivered = pcall(vim.rpcnotify, M.chan, 'showme', 'ask', mark)
   if not delivered then M.pending[#M.pending + 1] = mark end
   M.asks[M.ask_seq] = {
     buf = buf,
     mark = vim.api.nvim_buf_set_extmark(buf, M.ask_ns, o.line1 - 1, 0, {
-      end_row = o.line2 - 1, end_col = 0, sign_text = '?>', sign_hl_group = 'NvimMcpAsk',
-      line_hl_group = 'NvimMcpAsk', strict = false,
+      end_row = o.line2 - 1, end_col = 0, sign_text = '?>', sign_hl_group = 'ShowMeAsk',
+      line_hl_group = 'ShowMeAsk', strict = false,
     }),
   }
-  vim.notify(delivered and 'nvim-mcp: question handed to the agent'
-             or 'nvim-mcp: broker away, question kept for it')
+  vim.notify(delivered and 'showme: question handed to the agent'
+             or 'showme: broker away, question kept for it')
 end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' })
 
 -- The other direction, for the chat rather than the session: `:Ref` puts a
@@ -627,7 +627,7 @@ end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' 
 vim.api.nvim_create_user_command('Ref', function(o)
   local name = vim.api.nvim_buf_get_name(0)
   if name == '' then
-    vim.notify('nvim-mcp: buffer has no file')
+    vim.notify('showme: buffer has no file')
     return
   end
   local path = vim.fn.fnamemodify(name, ':.')
@@ -637,9 +637,9 @@ vim.api.nvim_create_user_command('Ref', function(o)
   -- picks the one that fits the session it was started in, and a session's
   -- nvim inherits the environment of the shell that asked for it.
   if vim.fn.has('clipboard') == 0 then
-    vim.notify('nvim-mcp: no clipboard provider; ' .. ref)
+    vim.notify('showme: no clipboard provider; ' .. ref)
     return
   end
   vim.fn.setreg('+', ref)
-  vim.notify('nvim-mcp: copied ' .. ref)
+  vim.notify('showme: copied ' .. ref)
 end, { range = true, desc = 'Copy a reference to the current line or range' })

@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.nvimrpc import NvimRPC
+from showme import paths
+from showme.nvimrpc import NvimRPC
 
 pytestmark = pytest.mark.nvim
 
@@ -55,7 +55,7 @@ async def test_show_opens_a_tab_per_file_and_lists_positions(
           switchbuf = vim.o.switchbuf,
           marks = vim.api.nvim_buf_get_extmarks(
             vim.fn.bufnr('src/main.c'),
-            vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, { details = true }),
+            vim.api.nvim_create_namespace('showme-show'), 0, -1, { details = true }),
         }
     """)
     assert state["tabs"] == 2
@@ -63,13 +63,13 @@ async def test_show_opens_a_tab_per_file_and_lists_positions(
     assert state["items"] == 2
     assert state["switchbuf"] == "usetab,newtab"
     details = [mark[3] for mark in state["marks"]]
-    assert [d for d in details if d.get("hl_group") == "NvimMcpShow"], (
+    assert [d for d in details if d.get("hl_group") == "ShowMeShow"], (
         "no range highlight"
     )
     notes = [d["virt_lines"] for d in details if "virt_lines" in d]
     # The trailing empty chunk stretches the note's background to the end of the
     # screen line, so it reads as a band instead of a run of coloured text.
-    assert notes == [[[["  A1  here", "NvimMcpNote"], ["", "NvimMcpNote"]]]]
+    assert notes == [[[["  A1  here", "ShowMeNote"], ["", "ShowMeNote"]]]]
     await nvim.close()
     await wire.close()
 
@@ -155,7 +155,7 @@ async def test_a_range_past_the_end_of_the_file_still_highlights(
     mark = await nvim.lua("""
         return vim.api.nvim_buf_get_extmarks(
           vim.fn.bufnr('src/main.c'),
-          vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, { details = true })[1]
+          vim.api.nvim_create_namespace('showme-show'), 0, -1, { details = true })[1]
     """)
     row, details = mark[1], mark[3]
     assert row == lines - 2
@@ -183,7 +183,7 @@ async def test_a_long_note_folds_to_the_window_width(
         local buf = vim.fn.bufnr('src/main.c')
         local out = {}
         for _, mark in ipairs(vim.api.nvim_buf_get_extmarks(
-            buf, vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1,
+            buf, vim.api.nvim_create_namespace('showme-show'), 0, -1,
             { details = true })) do
           for _, line in ipairs(mark[4].virt_lines or {}) do
             out[#out + 1] = line[1][1]

@@ -1,8 +1,8 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Two agents on one session. `nv box` reuses the session rooted at a tree, so
-a second box working there shares the human's editor rather than opening its
+"""Two agents on one session. `showme box` reuses the session rooted at a tree,
+so a second box working there shares the human's editor rather than opening its
 own, and the two can call at the same moment."""
 
 from __future__ import annotations
@@ -15,8 +15,8 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.session import Location, Session
+from showme import paths
+from showme.session import Location, Session
 
 pytestmark = pytest.mark.nvim
 

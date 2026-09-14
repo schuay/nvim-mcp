@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -10,12 +10,12 @@ from pathlib import Path
 import pytest
 from conftest import admin, start_broker, stop_broker
 
-from nvim_mcp import broker as broker_module
-from nvim_mcp import paths
-from nvim_mcp.broker import Broker
-from nvim_mcp.clamp import Refused
-from nvim_mcp.nvimrpc import NvimRPC
-from nvim_mcp.session import Session
+from showme import broker as broker_module
+from showme import paths
+from showme.broker import Broker
+from showme.clamp import Refused
+from showme.nvimrpc import NvimRPC
+from showme.session import Session
 
 pytestmark = pytest.mark.nvim
 
@@ -84,7 +84,7 @@ async def test_asking_whether_a_dead_session_is_attached_does_not_revive_it(
 async def test_stop_hands_the_sessions_to_the_next_broker(
     runtime: Path, repo: Path
 ) -> None:
-    """`nv restart-broker` is this, then a new broker on the same sockets."""
+    """`showme restart-broker` is this, then a broker on the same sockets."""
     stop, task = await start_broker()
     created = await admin({"cmd": "new", "root": str(repo)})
     reply = await admin({"cmd": "stop"})
@@ -138,7 +138,7 @@ async def test_ensure_applies_the_guard_and_new_does_not(
     with pytest.raises(Refused, match="no repository"):
         await broker.ensure_session(str(loose))
 
-    # `nv new` is the human naming a root, and is left alone.
+    # `showme new` is the human naming a root, and is left alone.
     session = await broker.new_session(str(loose), clean=True)
     try:
         assert session.root.path == loose

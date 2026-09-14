@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Register the tools with an agent harness, in the human's own config file.
@@ -23,7 +23,7 @@ from typing import Any
 
 #: The server's name in a harness config. The tools are `show` and `read`;
 #: this is what the human sees in a server list.
-NAME = "nvim"
+NAME = "showme"
 
 
 @dataclass(frozen=True)
@@ -58,10 +58,10 @@ HARNESSES = {
 }
 
 
-def nv_command() -> str:
-    """The absolute path of this `nv`, so a harness does not need it on PATH."""
-    found = shutil.which(sys.argv[0]) or shutil.which("nv")
-    return str(Path(found).resolve()) if found else "nv"
+def showme_command() -> str:
+    """The absolute path of this `showme`, so a harness does not need it on PATH."""
+    found = shutil.which(sys.argv[0]) or shutil.which("showme")
+    return str(Path(found).resolve()) if found else "showme"
 
 
 def opencode_path() -> Path:
@@ -133,7 +133,7 @@ def apply(path: Path, text: str) -> Path | None:
     """Write the config, keeping a copy of what was there. Returns the copy."""
     backup = None
     if path.exists():
-        backup = path.with_suffix(path.suffix + ".nvim-mcp.bak")
+        backup = path.with_suffix(path.suffix + ".showme.bak")
         shutil.copyfile(path, backup)
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text)
@@ -155,7 +155,7 @@ TERMINALS = {
 
 
 def terminal_suggestion() -> str | None:
-    """A value for NVIM_MCP_TERMINAL, from the terminal the human is in."""
+    """A value for SHOWME_TERMINAL, from the terminal the human is in."""
     program = (os.environ.get("TERM_PROGRAM") or "").lower()
     candidates = [program, os.environ.get("TERMINAL", ""), *TERMINALS]
     for candidate in candidates:

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 # Check staged files without resolving, installing, or updating anything.

@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -10,8 +10,8 @@ import pytest
 from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.nvimrpc import NvimRPC
+from showme import paths
+from showme.nvimrpc import NvimRPC
 
 pytestmark = pytest.mark.nvim
 
@@ -56,7 +56,7 @@ async def test_a_review_survives_a_broker_restart(runtime: Path, repo: Path) -> 
         await wire.close()
 
         nvim = await NvimRPC.connect(Path(listing[0]["socket"]))
-        notes = await nvim.lua("return NvimMcp.frames[1].notes")
+        notes = await nvim.lua("return ShowMe.frames[1].notes")
         assert [note["text"] for note in notes] == ["look here"]
         await nvim.close()
     finally:
@@ -91,7 +91,7 @@ async def test_notes_come_back_when_a_buffer_is_reopened(
     marks = await nvim.lua("""
         local function count()
           return #vim.api.nvim_buf_get_extmarks(vim.fn.bufnr('src/main.c'),
-            vim.api.nvim_create_namespace('nvim-mcp-show'), 0, -1, {})
+            vim.api.nvim_create_namespace('showme-show'), 0, -1, {})
         end
         local before = count()
         vim.cmd('bdelete! ' .. vim.fn.bufnr('src/main.c'))
@@ -276,7 +276,7 @@ async def signs(nvim: NvimRPC) -> int:
         for _, buf in ipairs(vim.api.nvim_list_bufs()) do
           if vim.api.nvim_buf_is_loaded(buf) then
             n = n + #vim.api.nvim_buf_get_extmarks(
-              buf, vim.api.nvim_create_namespace('nvim-mcp-ask'), 0, -1, {})
+              buf, vim.api.nvim_create_namespace('showme-ask'), 0, -1, {})
           end
         end
         return n

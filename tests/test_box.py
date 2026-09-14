@@ -1,8 +1,8 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Launching an agent for one session: `nv ensure`, `nv box`, and the key a
-sandboxed client presents instead of being told."""
+"""Launching an agent for one session: `showme ensure`, `showme box`, and the
+key a sandboxed client presents instead of being told."""
 
 from __future__ import annotations
 
@@ -16,7 +16,7 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import cli, paths
+from showme import cli, paths
 
 pytestmark = pytest.mark.nvim
 
@@ -66,7 +66,7 @@ def test_box_leaves_a_key_and_a_spec_that_binds_only_it(
     assert spec.parent == paths.box_dir()
     # stdout is what a launcher consumes, so nothing else may appear on it.
     assert captured.out.splitlines() == [str(spec)]
-    assert "attach with:  nv " in captured.err
+    assert "attach with:  showme " in captured.err
 
     directory = spec.parent / spec.stem
     body = spec.read_text()
@@ -118,7 +118,7 @@ async def test_a_client_with_no_key_is_told_what_to_do(
     wire = await Wire.connect(paths.agent_socket())
     result = await wire.call("show", {"locations": [{"file": "src/main.c"}]})
     assert result.get("isError") is True
-    assert "nv new" in result["content"][0]["text"]
+    assert "showme new" in result["content"][0]["text"]
     await wire.close()
 
 

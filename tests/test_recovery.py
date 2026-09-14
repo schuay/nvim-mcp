@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 """Losing contact with nvim must not cost the human anything.
@@ -16,10 +16,10 @@ import pytest
 from conftest import admin
 from mcpwire import Wire
 
-from nvim_mcp import paths
-from nvim_mcp.models import LOCATION_LIMIT
-from nvim_mcp.nvimrpc import NvimRPC
-from nvim_mcp.session import MARK_TEXT_LIMIT, NOTE_LIMIT, Location, Session
+from showme import paths
+from showme.models import LOCATION_LIMIT
+from showme.nvimrpc import NvimRPC
+from showme.session import MARK_TEXT_LIMIT, NOTE_LIMIT, Location, Session
 
 pytestmark = pytest.mark.nvim
 

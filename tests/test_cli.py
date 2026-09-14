@@ -1,4 +1,4 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
 from __future__ import annotations
@@ -8,14 +8,14 @@ from pathlib import Path
 
 import pytest
 
-from nvim_mcp import cli
+from showme import cli
 
 
 def test_new_sends_the_root_as_seen_from_the_callers_shell(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     # The broker resolves paths against its own cwd, which is wherever the
-    # first `nv` happened to run. A relative root has to be made absolute
+    # first `showme` happened to run. A relative root has to be made absolute
     # before it leaves this process.
     caller = tmp_path / "caller"
     caller.mkdir()
@@ -51,7 +51,7 @@ def test_only_what_a_session_needs_leaves_the_shell(
 ) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-secret")
     monkeypatch.setenv("SSH_AUTH_SOCK", "/run/user/1000/keyring/ssh")
-    monkeypatch.setenv("NVIM_MCP_TERMINAL", "ghostty -e")
+    monkeypatch.setenv("SHOWME_TERMINAL", "ghostty -e")
     monkeypatch.setenv("PATH", "/usr/bin")
     kept = cli.session_env()
     # The whole environment used to go, and it is written to the state file
@@ -59,4 +59,4 @@ def test_only_what_a_session_needs_leaves_the_shell(
     assert "ANTHROPIC_API_KEY" not in kept
     assert "SSH_AUTH_SOCK" not in kept
     assert kept["PATH"] == "/usr/bin"
-    assert kept["NVIM_MCP_TERMINAL"] == "ghostty -e"
+    assert kept["SHOWME_TERMINAL"] == "ghostty -e"

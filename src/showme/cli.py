@@ -1,7 +1,7 @@
-# Copyright 2026 The nvim-mcp developers
+# Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""`nv`: create sessions, attach a terminal to one, and inspect them.
+"""`showme`: create sessions, attach a terminal to one, and inspect them.
 
 Sessions are created here rather than by a client, because the root a session is
 clamped to has to come from the human. This shell's environment goes along, so
@@ -54,7 +54,7 @@ def _ensure_broker(timeout: float = 10.0) -> None:
     # the shell that started it.
     with paths.broker_log().open("ab") as log:
         subprocess.Popen(
-            [sys.executable, "-m", "nvim_mcp.broker"],
+            [sys.executable, "-m", "showme.broker"],
             start_new_session=True,
             stdin=subprocess.DEVNULL,
             stdout=log,
@@ -68,7 +68,7 @@ def _ensure_broker(timeout: float = 10.0) -> None:
             time.sleep(0.05)
         else:
             return
-    raise SystemExit("nvim-mcp: broker did not start")
+    raise SystemExit("showme: broker did not start")
 
 
 def cmd_new(args: argparse.Namespace) -> int:
@@ -80,14 +80,14 @@ def cmd_new(args: argparse.Namespace) -> int:
             # it, and a relative root would be taken against that.
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
-            "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
+            "background": args.background or os.environ.get("SHOWME_BACKGROUND"),
             "env": session_env(),
         }
     )
     if not reply["ok"]:
-        raise SystemExit(f"nvim-mcp: {reply['error']}")
+        raise SystemExit(f"showme: {reply['error']}")
     print(f"session {reply['id']}  root {reply['root']}")
-    print(f"attach:  nv {reply['id']}")
+    print(f"attach:  showme {reply['id']}")
     print(f"give the agent this key:  {reply['key']}")
     return 0
 
@@ -120,7 +120,7 @@ ENV_KEEP = frozenset(
         "PAGER",
     }
 )
-ENV_KEEP_PREFIXES = ("LC_", "XDG_", "NVIM_", "VIM")
+ENV_KEEP_PREFIXES = ("LC_", "XDG_", "NVIM_", "VIM", "SHOWME_")
 
 
 def session_env() -> dict[str, str]:
@@ -138,13 +138,13 @@ def _session_for(args: argparse.Namespace, command: str) -> dict[str, Any]:
             "cmd": command,
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
-            "background": args.background or os.environ.get("NVIM_MCP_BACKGROUND"),
+            "background": args.background or os.environ.get("SHOWME_BACKGROUND"),
             "env": session_env(),
         },
         timeout=30.0,
     )
     if not reply["ok"]:
-        raise SystemExit(f"nvim-mcp: {reply['error']}")
+        raise SystemExit(f"showme: {reply['error']}")
     return reply
 
 
@@ -184,8 +184,8 @@ def cmd_box(args: argparse.Namespace) -> int:
     print(spec)
     state = "new session" if reply["created"] else "session"
     print(
-        f"nvim-mcp: {state} {reply['id']}  root {reply['root']}\n"
-        f"nvim-mcp: attach with:  nv {reply['id']}",
+        f"showme: {state} {reply['id']}  root {reply['root']}\n"
+        f"showme: attach with:  showme {reply['id']}",
         file=sys.stderr,
     )
     return 0
@@ -222,10 +222,10 @@ def cmd_attach(args: argparse.Namespace) -> NoReturn:
     # would be an error when nothing listens on it.
     reply = _ask({"cmd": "attach", "id": args.id}, timeout=30.0)
     if not reply["ok"]:
-        raise SystemExit(f"nvim-mcp: {reply['error']}")
+        raise SystemExit(f"showme: {reply['error']}")
     nvim = shutil.which("nvim")
     if nvim is None:
-        raise SystemExit("nvim-mcp: nvim is not on PATH")
+        raise SystemExit("showme: nvim is not on PATH")
     # A resolved path, a fixed argv, and a socket path the broker chose.
     # Replacing this process is what makes the terminal the session's UI.
     os.execv(nvim, [nvim, "--remote-ui", "--server", reply["socket"]])  # noqa: S606
@@ -284,7 +284,7 @@ def _session_here() -> str | None:
     if not reply.get("ok"):
         # A root the human would not have chosen, most likely. Nothing is
         # refused outright: they can still name a session by hand.
-        print(f"nvim-mcp: {reply.get('error')}", file=sys.stderr)
+        print(f"showme: {reply.get('error')}", file=sys.stderr)
         return None
     return str(reply["key"])
 
@@ -298,8 +298,8 @@ def _confirm(question: str, assume_yes: bool) -> bool:
     if assume_yes:
         return True
     if not sys.stdin.isatty():
-        print(f"nvim-mcp: {question} -- not a terminal, so nothing was changed.")
-        print("nvim-mcp: pass --yes to write it anyway.")
+        print(f"showme: {question} -- not a terminal, so nothing was changed.")
+        print("showme: pass --yes to write it anyway.")
         return False
     try:
         return input(f"{question} [y/N] ").strip().lower() in {"y", "yes"}
@@ -312,31 +312,31 @@ def cmd_install(args: argparse.Namespace) -> int:
     harness = install.HARNESSES[args.harness]
     if shutil.which("nvim") is None:
         raise SystemExit(
-            "nvim-mcp: nvim is not on PATH, and it is the whole point.\n"
-            "nvim-mcp: install it first, then run this again."
+            "showme: nvim is not on PATH, and it is the whole point.\n"
+            "showme: install it first, then run this again."
         )
 
-    command = install.nv_command()
+    command = install.showme_command()
     try:
         path, shown, text = install.plan(harness, command)
     except install.Unparsable as e:
         # Better a snippet the human pastes than a file this one rewrote by
         # guessing at what it meant.
-        print(f"nvim-mcp: {e}")
-        print("nvim-mcp: add this to it yourself:\n")
+        print(f"showme: {e}")
+        print("showme: add this to it yourself:\n")
         print(textwrap.indent(install.snippet(harness, command), "    "))
         return 1
 
     if text is None:
-        print(f"nvim-mcp: {harness.label} already starts {install.NAME} from {path}")
+        print(f"showme: {harness.label} already starts {install.NAME} from {path}")
     else:
-        print(f"nvim-mcp: this goes in {path}:\n")
+        print(f"showme: this goes in {path}:\n")
         print(textwrap.indent(shown, "    "))
         print()
         if not _confirm(f"Add it to {harness.label}?", args.yes):
             return 1
         backup = install.apply(path, text)
-        print(f"nvim-mcp: written{f'; previous copy at {backup}' if backup else ''}")
+        print(f"showme: written{f'; previous copy at {backup}' if backup else ''}")
 
     _offer_terminal(args.yes)
     print(GREETING.format(harness=harness.label))
@@ -352,28 +352,28 @@ def _offer_terminal(assume_yes: bool) -> None:
         return
     line = f'export {lifecycle.TERMINAL}="{suggestion}"'
     print(
-        f"\nnvim-mcp: with {lifecycle.TERMINAL} set, a session opens its own window\n"
-        "nvim-mcp: the first time an agent shows you something and nothing is\n"
-        f"nvim-mcp: on screen. For this terminal that is:\n\n    {line}\n"
+        f"\nshowme: with {lifecycle.TERMINAL} set, a session opens its own window\n"
+        "showme: the first time an agent shows you something and nothing is\n"
+        f"showme: on screen. For this terminal that is:\n\n    {line}\n"
     )
     rc = install.shell_rc()
     if rc is not None and rc.exists() and lifecycle.TERMINAL in rc.read_text():
         # Already written by an earlier run, or by hand. Appending a second
         # export would only be confusing.
-        print(f"nvim-mcp: {rc} already sets it; start a new shell to pick it up.")
+        print(f"showme: {rc} already sets it; start a new shell to pick it up.")
         return
     if rc is None or not _confirm(f"Append it to {rc}?", assume_yes):
-        print("nvim-mcp: add it to your shell yourself, or leave it out.")
+        print("showme: add it to your shell yourself, or leave it out.")
         return
     with rc.open("a") as handle:
         handle.write(
-            f"\n# Opens a window for an nvim-mcp session nobody is watching.\n{line}\n"
+            f"\n# Opens a window for a showme session nobody is watching.\n{line}\n"
         )
-    print(f"nvim-mcp: appended to {rc}; it applies to new shells.")
+    print(f"showme: appended to {rc}; it applies to new shells.")
 
 
 GREETING = """
-nvim-mcp is set up for {harness}. Restart it so it picks the server up.
+showme is set up for {harness}. Restart it so it picks the server up.
 
   Then just ask it to show you something. It gets a session for whatever
   directory you started it in, nvim starts with the first thing it shows,
@@ -387,7 +387,7 @@ nvim-mcp is set up for {harness}. Restart it so it picks the server up.
     :q               safe -- the session comes back with the notes where
                      your edits left them
 
-  `nv ls` lists what is running, if you ever want to look.
+  `showme ls` lists what is running, if you ever want to look.
 """
 
 
@@ -402,10 +402,10 @@ def cmd_restart_broker(_args: argparse.Namespace) -> int:
     try:
         reply = _ask({"cmd": "stop"})
     except OSError:
-        print("nvim-mcp: no broker running")
+        print("showme: no broker running")
     else:
         if reply.get("ok"):
-            print(f"nvim-mcp: stopping, {reply['sessions']} session(s) to hand over")
+            print(f"showme: stopping, {reply['sessions']} session(s) to hand over")
         else:
             # A broker old enough not to know the command is exactly the one
             # worth replacing, so ask the socket who is listening and signal
@@ -416,10 +416,10 @@ def cmd_restart_broker(_args: argparse.Namespace) -> int:
         # it releases the lock, and a new one that starts too early finds the
         # lock held and exits without a word.
         if not _lock_free(10.0):
-            raise SystemExit("nvim-mcp: the broker is still running")
+            raise SystemExit("showme: the broker is still running")
     _ensure_broker()
     sessions = _ask({"cmd": "ls"})["sessions"]
-    print(f"nvim-mcp: broker restarted with {len(sessions)} session(s)")
+    print(f"showme: broker restarted with {len(sessions)} session(s)")
     return 0
 
 
@@ -430,7 +430,7 @@ def _terminate_broker(reason: str) -> None:
             socket.SOL_SOCKET, socket.SO_PEERCRED, struct.calcsize("3i")
         )
     pid, _, _ = struct.unpack("3i", credentials)
-    print(f"nvim-mcp: {reason}; signalling broker {pid}")
+    print(f"showme: {reason}; signalling broker {pid}")
     with contextlib.suppress(ProcessLookupError, PermissionError):
         os.kill(pid, signal.SIGTERM)
 
@@ -458,11 +458,11 @@ def cmd_broker(_args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `nv 3` is the common case and should not need a subcommand.
+    # `showme 3` is the common case and should not need a subcommand.
     if argv and argv[0].isdigit():
         argv = ["attach", *argv]
 
-    parser = argparse.ArgumentParser(prog="nv", description="talk to nvim sessions")
+    parser = argparse.ArgumentParser(prog="showme", description="talk to nvim sessions")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
     new = sub.add_parser("new", help="create a session rooted at a directory")
