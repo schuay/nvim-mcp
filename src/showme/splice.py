@@ -10,6 +10,10 @@ nothing outside the standard library because it also runs inside a sandbox
 that cannot install anything. The broker writes a copy of this file next to
 its agent socket.
 
+The line it sends before any JSON-RPC names both the session key it was
+launched with and the conversation it serves, which is what the broker keys a
+session on.
+
 The client sees one MCP session for as long as it keeps this process. When
 the broker goes away, the connection is made again on the client's next
 message: the handshake the client sent at the start is replayed and its
@@ -26,6 +30,7 @@ import selectors
 import socket
 import sys
 import time
+import uuid
 from collections.abc import Callable
 from typing import Any
 
@@ -39,6 +44,33 @@ CONNECTION_LOST = -32000
 #: setup, the same layer as the handshake replayed below: no tool is named and
 #: no argument is rewritten, so this side still holds no schema.
 HELLO = "showme"
+
+#: Environment variables carrying the harness's own id for the conversation
+#: this client was started for, tried in order. Each was verified by reading
+#: the environment of a running MCP server process; a harness is supported by
+#: checking what it exports there and whether the value survives its resume,
+#: and adding the name here. A harness missing from the list costs its
+#: conversations nothing but the chance to be resumed.
+SESSION_VARS = ("CLAUDE_CODE_SESSION_ID",)
+
+
+def identify() -> tuple[str, bool]:
+    """Name the conversation this client serves, and say if the name lasts.
+
+    A session belongs to a conversation, and only the harness knows where one
+    begins and ends: this process is not the unit, since a harness may restart
+    its MCP server in the middle of a conversation and does start a fresh one
+    for a resumed one. Where the harness publishes its id, the session it
+    names can be picked up again; where it does not, a made-up id keeps this
+    launch's notes to itself, which is the property that matters most.
+    """
+    for name in SESSION_VARS:
+        value = os.environ.get(name)
+        if value:
+            # Qualified by the variable it came from: two harnesses numbering
+            # their sessions from one would otherwise name each other's.
+            return f"{name}:{value}", True
+    return f"launch:{uuid.uuid4().hex}", False
 
 
 def write_all(fd: int, data: bytes) -> None:
@@ -82,6 +114,10 @@ class Splice:
         #: The session this client was launched for, presented on every
         #: connection so a client in a sandbox never has to be told a key.
         self.key = key
+        #: Who the broker gives that session to. Named once per process and
+        #: presented with the key on every connection, so a broker restart
+        #: hands the same conversation back the session it was using.
+        self.agent, self.stable = identify()
         #: Asked for a broker when nothing answers the socket. On the host this
         #: starts one; a sandbox either has no way to ask (None) or starts one
         #: that cannot claim the read-only agent directory.
@@ -247,7 +283,8 @@ class Splice:
         with tools that answer every call with "no such session".
         """
         try:
-            sock.sendall(json.dumps({HELLO: {"key": self.key}}).encode() + b"\n")
+            opening = {"key": self.key, "agent": self.agent, "stable": self.stable}
+            sock.sendall(json.dumps({HELLO: opening}).encode() + b"\n")
             sock.settimeout(RECONNECT_WINDOW)
             lines = Lines()
             while True:

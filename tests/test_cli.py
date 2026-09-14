@@ -60,3 +60,25 @@ def test_only_what_a_session_needs_leaves_the_shell(
     assert "SSH_AUTH_SOCK" not in kept
     assert kept["PATH"] == "/usr/bin"
     assert kept["SHOWME_TERMINAL"] == "ghostty -e"
+
+
+def test_a_directory_attaches_without_a_subcommand(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A launcher prints the root rather than a session id, so that is what a
+    human has to hand to type."""
+    seen: list[str] = []
+    monkeypatch.setattr(cli, "cmd_attach", lambda args: seen.append(args.id) or 0)
+    assert cli.main([str(tmp_path)]) == 0
+    assert cli.main(["7"]) == 0
+    assert seen == [str(tmp_path), "7"]
+
+
+def test_a_command_name_wins_over_a_directory_of_the_same_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    (tmp_path / "ls").mkdir()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(cli, "cmd_attach", lambda args: pytest.fail("attached"))
+    monkeypatch.setattr(cli, "cmd_ls", lambda args: 0)
+    assert cli.main(["ls"]) == 0

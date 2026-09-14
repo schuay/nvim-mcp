@@ -12,6 +12,16 @@ Reaching the admin socket is itself the proof that a client is on the host,
 which is what lets it take the key that reads outside its session's root. A
 sandboxed one never gets to make the claim: its key is put where it will find
 it by a launcher running out here.
+
+A session belongs to one agent conversation. A launcher prepares one per
+launch because it cannot know which conversation it is starting; the client
+names that conversation when it connects, and this is where the two are put
+together -- handing back the session a resumed conversation already had, and
+dropping the spare. Keying sessions on the tree instead is what let one
+conversation's notes land in a frame another had abandoned there.
+
+Nothing marks the end of a conversation, so the collector decides: a session
+no client holds, with no terminal on it, is taken once its window has passed.
 """
 
 from __future__ import annotations
@@ -22,6 +32,8 @@ import fcntl
 import json
 import logging
 import shutil
+import time
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -34,6 +46,13 @@ log = logging.getLogger(__name__)
 #: Exit once nothing has needed the broker for this long.
 IDLE_EXIT_SECONDS = 15 * 60
 
+#: How long a detached session is kept before the collector takes it. A named
+#: conversation may be resumed, and is given a day to come back; one that made
+#: its own name cannot be resumed at all, so it is kept only long enough for
+#: the human to finish reading a review the agent left behind.
+RESUMABLE_SECONDS = 24 * 60 * 60
+LAUNCH_SECONDS = 30 * 60
+
 #: How long a line a client may send. One tool call is one line, and the
 #: contract accepts 50 locations carrying 2000 characters of note each, which
 #: is several times asyncio's 64 KiB default: a call the tools would have
@@ -42,12 +61,29 @@ IDLE_EXIT_SECONDS = 15 * 60
 LINE_LIMIT = 4 * 1024 * 1024
 
 
+@dataclass
+class Claim:
+    """The session a client reached, and what the key it presented reaches.
+
+    The key is kept as the client sent it: a host client presents the
+    unclamped one, and answering its later calls with the session's clamped
+    key instead would quietly take away the reach it connected with.
+    """
+
+    key: str
+    session: Session
+    root: Root
+
+
 class Broker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
         #: Live client connections. Closing a listener waits for these, so
         #: shutdown has to end them itself or a connected client pins the broker.
         self.connections: set[asyncio.Task[None]] = set()
+        #: Sessions a client is holding right now, by sid. The collector
+        #: leaves these alone however old their last contact is.
+        self.held: set[str] = set()
         #: Held while the registry changes. Creating a session awaits nvim
         #: startup, and two creations that pick an id before either has
         #: registered would pick the same one.
@@ -105,22 +141,25 @@ class Broker:
         async with self._lock:
             return await self._create(root, clean, background, env)
 
-    async def ensure_session(
+    async def launch_session(
         self,
         root: str,
         clean: bool = False,
         background: str | None = None,
         env: dict[str, str] | None = None,
-        *,
-        spawn: bool = True,
-    ) -> tuple[Session, bool]:
-        """Return the session already rooted here, or make one.
+    ) -> Session:
+        """Record a session for a launcher about to start an agent.
 
-        A launcher runs this every time it starts an agent, so a second one in
-        the same tree joins the review already on the human's screen instead of
-        opening an editor nobody is looking at. The lookup and the create share
-        one lock: two launchers racing in the same tree must not end up with a
-        session each.
+        One per launch, never shared: a launcher cannot know which
+        conversation it is starting -- the harness has not assigned an id yet
+        -- so it cannot pick the session, only prepare one. Which session the
+        agent ends up on is settled at the hello, where its own name is
+        finally known, and this one is handed over or dropped there.
+
+        nvim waits until something is shown. An agent that opens nothing
+        should not cost the human an editor process, and the launch context
+        collected here -- the shell's environment, the terminal's background --
+        is what that nvim will be started with whenever it is.
 
         The root is the directory the launcher was standing in, and nothing
         here second-guesses it. The tree it names is the one that launcher has
@@ -129,10 +168,54 @@ class Broker:
         repository is a project like any other.
         """
         async with self._lock:
-            for session in self.sessions.values():
-                if str(session.root.path) == root:
-                    return session, False
-            return await self._create(root, clean, background, env, spawn), True
+            return await self._create(root, clean, background, env, spawn=False)
+
+    async def claim(self, key: str, agent: str, stable: bool) -> Claim | None:
+        """Give a client the session its conversation is on.
+
+        The key says which launch this is and what that launch may reach; the
+        agent says whose conversation it serves. A conversation that already
+        has a session takes it back -- this is a resumed one, or a client
+        reconnecting after its MCP server was restarted -- and the session
+        left by the launch is dropped, having never been shown anything. The
+        session that survives answers to the keys the client actually holds,
+        since the ones it was created with are the only pair that client
+        knows.
+        """
+        async with self._lock:
+            found = self.session_by_key(key)
+            if found is None:
+                return None
+            session, root = found
+            if not agent:
+                # A client that does not name itself gets what its key names
+                # and nothing more: with no conversation to speak of, there is
+                # nothing to hand back to it later.
+                return Claim(key, session, root)
+            held = self._session_of(agent, besides=session)
+            if held is not None:
+                held.rekey(session.key, session.host_key)
+                root = held.authorize(key) or root
+                await self._drop(session)
+                session = held
+            session.agent, session.stable = agent, stable
+            session.touch()
+            self.save()
+            return Claim(key, session, root)
+
+    def _session_of(self, agent: str, besides: Session) -> Session | None:
+        return next(
+            (
+                session
+                for session in self.sessions.values()
+                if session.agent == agent and session is not besides
+            ),
+            None,
+        )
+
+    async def _drop(self, session: Session) -> None:
+        self.sessions.pop(session.sid, None)
+        await session.close()
 
     async def _create(
         self,
@@ -168,18 +251,61 @@ class Broker:
             self.save()
             return True
 
+    def session_in(self, directory: str) -> Session | None:
+        """The session to attach to for a tree, newest use first.
+
+        A launcher prints the root rather than an id, because the id it made
+        is not always the one the agent ends up on. A tree with several
+        conversations working in it answers with the one most recently used,
+        and `showme ls` is how to reach any of the others.
+        """
+        try:
+            wanted = Path(directory).expanduser().resolve()
+        except OSError:
+            return None
+        rooted = [
+            session
+            for session in self.sessions.values()
+            if session.root.path == wanted or wanted in session.root.path.parents
+        ]
+        return max(rooted, key=lambda s: s.last_seen, default=None)
+
     async def attach(self, sid: str, background: str | None = None) -> Session | None:
         """Have a session's nvim running so a terminal can attach to it.
 
         `background` is what the attaching terminal answered, which only that
         process could ask; the session decides whether it outranks its own.
         """
-        session = self.sessions.get(sid)
+        session = self.sessions.get(sid) or self.session_in(sid)
         if session is not None:
             await session.ensure()
             if background is not None:
                 await session.wear_background(background)
         return session
+
+    async def collect(self) -> None:
+        """Stop sessions nothing is using any more.
+
+        A conversation ends without telling anyone: the client goes away and
+        the session it was on stays, holding an editor and a set of frames
+        nobody will add to. Age alone is not enough to act on, because the
+        review may have outlived the agent on purpose and the human may still
+        be reading it -- so a session with a UI on it is in use whatever its
+        client did, and one with none is taken once its window has passed.
+        """
+        for session in list(self.sessions.values()):
+            if session.sid in self.held:
+                continue
+            window = RESUMABLE_SECONDS if session.stable else LAUNCH_SECONDS
+            if time.time() - session.last_seen < window:
+                continue
+            if await session.attached():
+                # Being read counts as being used, and the human closing that
+                # terminal is what starts the clock again.
+                session.touch()
+                continue
+            log.info("session %s: collected, nothing was using it", session.sid)
+            await self.kill(session.sid)
 
     async def close(self) -> None:
         """Let go of every session's nvim without stopping it.
@@ -250,19 +376,17 @@ async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
     # outside the root, and reaching it is the proof: the admin socket lives in
     # the runtime directory, which no sandbox mounts.
     unclamped = bool(request.get("open"))
-    session, created = await broker.ensure_session(
+    session = await broker.launch_session(
         request["root"],
         bool(request.get("clean")),
         request.get("background"),
         request.get("env"),
-        spawn=bool(request.get("spawn", True)),
     )
     return {
         "id": session.sid,
         "key": session.host_key if unclamped else session.key,
         "root": str(session.root.path),
         "socket": str(session.socket),
-        "created": created,
     }
 
 
@@ -283,6 +407,7 @@ async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
                 "root": str(session.root.path),
                 "socket": str(session.socket),
                 "attached": await session.attached(),
+                "showing": session.showing,
             }
         )
     return {"sessions": listing}
@@ -332,13 +457,14 @@ class _Pushback:
 
 async def _hello(
     broker: Broker, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-) -> tuple[Any, str | None]:
+) -> tuple[Any, Claim | None]:
     """Take the client's opening line and, if it names a session, answer it.
 
     A client launched for one session presents its key here instead of putting
     it in every call, which is what lets a sandboxed one work without ever
-    being told a key. A client that sends JSON-RPC straight away gets its line
-    handed back unread.
+    being told a key. It names its conversation here too, and this is where a
+    session is finally given to one. A client that sends JSON-RPC straight
+    away gets its line handed back unread.
     """
     line = await reader.readline()
     try:
@@ -347,21 +473,27 @@ async def _hello(
         opening = None
     if not isinstance(opening, dict) or splice.HELLO not in opening:
         return _Pushback(reader, line), None
-    key = str(opening[splice.HELLO].get("key") or "")
-    found = broker.session_by_key(key)
-    answer: dict[str, Any] = {"ok": found is not None}
-    if found is not None:
-        session, root = found
-        answer["session"] = session.sid
+    body = opening[splice.HELLO]
+    key = str(body.get("key") or "")
+    claimed = await broker.claim(
+        key, str(body.get("agent") or ""), bool(body.get("stable"))
+    )
+    answer: dict[str, Any] = {"ok": claimed is not None}
+    if claimed is not None:
+        answer["session"] = claimed.session.sid
         # Nothing about the connection says whether this client is sandboxed,
         # and nothing here needs to: which key it presented is what it reaches,
         # and is the only account of it worth keeping.
-        log.info("session %s: client holds the %s key", session.sid, root.scope)
+        log.info(
+            "session %s: client holds the %s key",
+            claimed.session.sid,
+            claimed.root.scope,
+        )
     else:
         answer["error"] = "no such session"
     writer.write(json.dumps({splice.HELLO: answer}).encode() + b"\n")
     await writer.drain()
-    return reader, key if found is not None else None
+    return reader, claimed
 
 
 async def _agent_client(
@@ -371,12 +503,16 @@ async def _agent_client(
     if task is not None:
         broker.connections.add(task)
     try:
-        stream, key = await _hello(broker, reader, writer)
+        stream, claimed = await _hello(broker, reader, writer)
     except (OSError, asyncio.IncompleteReadError):
         broker.connections.discard(task)
         writer.close()
         return
+    session = claimed.session if claimed is not None else None
+    key = claimed.key if claimed is not None else None
     server = mcpserver.build(broker.session_by_key, broker.save, default_key=key)
+    if session is not None:
+        broker.held.add(session.sid)
     try:
         await mcpserver.serve(stream, writer, server)
     except asyncio.CancelledError:
@@ -384,6 +520,12 @@ async def _agent_client(
     except Exception:
         log.exception("agent connection failed")
     finally:
+        if session is not None:
+            # The conversation may be back -- resumed, or its server restarted
+            # -- so the session stays, and this is when it starts ageing.
+            broker.held.discard(session.sid)
+            session.touch()
+            broker.save()
         broker.connections.discard(task)
         writer.close()
 
@@ -447,8 +589,9 @@ async def serve(stop: asyncio.Event | None = None) -> None:
 async def _until_idle(broker: Broker) -> None:
     """Wait while the broker has work.
 
-    A session with no client is not idle: its review may be finished and waiting
-    for a human who has not arrived yet.
+    A session with no client is not idle: its review may be finished and
+    waiting for a human who has not arrived yet. The collector is what
+    eventually decides one is nobody's, and until it does the broker stays.
     """
     idle_for = 0.0
     while True:
@@ -456,6 +599,7 @@ async def _until_idle(broker: Broker) -> None:
             await asyncio.wait_for(broker.stop.wait(), 5)
         if broker.stop.is_set():
             return
+        await broker.collect()
         if broker.sessions or broker.clients:
             idle_for = 0.0
             continue

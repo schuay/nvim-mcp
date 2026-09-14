@@ -3,13 +3,17 @@
 
 """`showme`: create sessions, attach a terminal to one, and inspect them.
 
-Sessions are created here rather than by a client, because the root a launcher
-clamps an agent to has to come from the human. This is also where a client on
-the host takes the key that reads outside that root: it asks over the admin
-socket, and being able to reach it is the proof. This shell's environment goes
-along, so the session's nvim finds the same language servers and display the
-human's everyday one does; the broker that spawns it was started from some
-other shell.
+Sessions are recorded here rather than by a client, because the root a
+launcher clamps an agent to has to come from the human. Which session an agent
+ends up on is not decided here: a launcher cannot know the conversation it is
+about to start, so it prepares one per launch and the broker settles it when
+the client says who it is.
+
+This is also where a client on the host takes the key that reads outside that
+root: it asks over the admin socket, and being able to reach it is the proof.
+This shell's environment goes along, so the session's nvim finds the same
+language servers and display the human's everyday one does; the broker that
+spawns it was started from some other shell.
 """
 
 from __future__ import annotations
@@ -189,10 +193,12 @@ def cmd_box(args: argparse.Namespace) -> int:
     spec.write_text(f'ro = [\n    "{directory}",\n]\n')
     # stdout is the one thing a launcher consumes; the rest is for the human.
     print(spec)
-    state = "new session" if reply["created"] else "session"
+    # By the root, not the session id: the id printed here names the session
+    # this launch prepared, which is not the one the agent gets if it turns
+    # out to be resuming a conversation. The root is true either way.
     print(
-        f"showme: {state} {reply['id']}  root {reply['root']}\n"
-        f"showme: attach with:  showme {reply['id']}",
+        f"showme: session for {reply['root']}\n"
+        f"showme: attach with:  showme {reply['root']}",
         file=sys.stderr,
     )
     return 0
@@ -215,8 +221,12 @@ def cmd_ls(_args: argparse.Namespace) -> int:
         return 0
     for session in sessions:
         state = "attached" if session["attached"] else "detached"
+        # Several sessions can be rooted in one tree -- one per conversation
+        # working there -- so the root alone no longer tells them apart.
+        showing = session.get("showing") or "nothing shown"
         print(
-            f"{session['id']:>3}  {state:<8}  {session['root']}  key {session['key']}"
+            f"{session['id']:>3}  {state:<8}  {session['root']}\n"
+            f"     {showing}  key {session['key']}"
         )
     if not sessions:
         print("no sessions")
@@ -342,8 +352,12 @@ def _session_here() -> str | None:
     and no key to paste. Only a client on the host can do it, because it goes
     through the admin socket, which lives in the runtime directory that no
     sandbox mounts -- the same split that keeps session administration off the
-    surface a box can reach. The session is recorded without starting nvim, so
-    an agent that never shows anything costs nothing.
+    surface a box can reach.
+
+    One per client process, and the broker decides from the hello whether this
+    is a conversation it already has a session for. A harness that restarts
+    its MCP server mid-conversation asks again here, and gets its own session
+    back.
 
     The key it comes back with reads outside the root, because this client is
     the human: it reads their files with its own tools either way, and a clamp
@@ -357,7 +371,6 @@ def _session_here() -> str | None:
                 "cmd": "ensure",
                 "root": str(Path.cwd()),
                 "env": session_env(),
-                "spawn": False,
                 "open": True,
             }
         )
@@ -542,10 +555,6 @@ def cmd_broker(_args: argparse.Namespace) -> int:
 
 def main(argv: list[str] | None = None) -> int:
     argv = list(sys.argv[1:] if argv is None else argv)
-    # `showme 3` is the common case and should not need a subcommand.
-    if argv and argv[0].isdigit():
-        argv = ["attach", *argv]
-
     parser = argparse.ArgumentParser(prog="showme", description="talk to nvim sessions")
     sub = parser.add_subparsers(dest="cmd", required=True)
 
@@ -591,7 +600,7 @@ def main(argv: list[str] | None = None) -> int:
     sub.add_parser("ls", help="list sessions").set_defaults(func=cmd_ls)
 
     attach = sub.add_parser("attach", help="attach this terminal to a session")
-    attach.add_argument("id")
+    attach.add_argument("id", help="a session id, or a directory one is rooted in")
     attach.set_defaults(func=cmd_attach)
 
     kill = sub.add_parser("kill", help="stop a session")
@@ -614,8 +623,18 @@ def main(argv: list[str] | None = None) -> int:
         func=cmd_broker
     )
 
+    # `showme 3` and `showme ~/src/thing` are the common cases and should not
+    # need a subcommand. A command name always wins, so a directory that
+    # happens to be called `ls` is reached by spelling out `showme attach ls`.
+    if argv and argv[0] not in sub.choices and _attachable(argv[0]):
+        argv = ["attach", *argv]
+
     args = parser.parse_args(argv)
     return args.func(args)
+
+
+def _attachable(argument: str) -> bool:
+    return argument.isdigit() or Path(argument).expanduser().is_dir()
 
 
 if __name__ == "__main__":

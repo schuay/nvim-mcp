@@ -118,31 +118,31 @@ async def test_a_launcher_may_root_a_session_in_a_plain_directory(
     loose.mkdir()
     broker = Broker()
 
-    session, created = await broker.ensure_session(str(loose), clean=True, spawn=False)
+    session = await broker.launch_session(str(loose), clean=True)
     try:
-        assert created is True
         assert session.root.path == loose
-        # And a second launcher in the same tree joins it.
-        again, created = await broker.ensure_session(str(loose), spawn=False)
-        assert created is False
-        assert again is session
+        # And nvim waits: an agent that shows nothing costs no editor.
+        assert not session.alive
     finally:
         await session.close()
 
 
-async def test_new_and_ensure_meet_in_the_same_tree(
+async def test_a_launch_does_not_take_over_the_session_a_human_made(
     runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`showme new` and a launcher in that root end up on one session."""
+    """`showme new` opens an editor for the human to hand out by key. A
+    launcher starting an agent in that tree is a different conversation and
+    must not land in it."""
     monkeypatch.setenv("HOME", str(tmp_path))
     loose = tmp_path / "notes"
     loose.mkdir()
     broker = Broker()
 
     session = await broker.new_session(str(loose), clean=True)
+    launched = await broker.launch_session(str(loose))
     try:
-        found, created = await broker.ensure_session(str(loose), spawn=False)
-        assert created is False
-        assert found is session
+        assert launched is not session
+        assert launched.key != session.key
     finally:
         await session.close()
+        await launched.close()

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -28,7 +29,13 @@ class Wire:
         self.initialized: dict[str, Any] | None = None
 
     @classmethod
-    async def connect(cls, socket: Path, key: str | None = None) -> Wire:
+    async def connect(
+        cls,
+        socket: Path,
+        key: str | None = None,
+        agent: str | None = None,
+        stable: bool = False,
+    ) -> Wire:
         # A result can carry a mark of buffer text or fifty long notes, which
         # is past asyncio's default line limit. The splice a real client runs
         # reads in chunks and has no such limit.
@@ -37,7 +44,11 @@ class Wire:
         )
         wire = cls(reader, writer)
         if key is not None:
-            wire.hello = await wire.present(key)
+            # A client names the conversation it serves, and two that do not
+            # say are two conversations, as two real clients would be.
+            wire.hello = await wire.present(
+                key, agent or f"test:{uuid.uuid4().hex}", stable
+            )
         wire.initialized = await wire.request(
             "initialize",
             {
@@ -49,9 +60,11 @@ class Wire:
         await wire.notify("notifications/initialized")
         return wire
 
-    async def present(self, key: str) -> dict[str, Any]:
+    async def present(
+        self, key: str, agent: str = "", stable: bool = False
+    ) -> dict[str, Any]:
         """Name a session before the MCP stream starts, as the splice does."""
-        body = {splice.HELLO: {"key": key}}
+        body = {splice.HELLO: {"key": key, "agent": agent, "stable": stable}}
         self.writer.write(json.dumps(body).encode() + b"\n")
         await self.writer.drain()
         line = await asyncio.wait_for(self.reader.readline(), 30)

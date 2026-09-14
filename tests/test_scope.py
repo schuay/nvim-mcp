@@ -26,13 +26,18 @@ async def call(wire: Wire, tool: str, key: str, **arguments: object) -> dict:
 
 
 async def keys(repo: Path) -> tuple[str, str]:
-    """The host key for a session rooted at `repo`, and its clamped one."""
+    """The host key for a session rooted at `repo`, and its clamped one.
+
+    Both keys of one session, which is a thing only a host client holds: a
+    second `ensure` would prepare a second session, so the clamped one is read
+    back from the listing instead.
+    """
     opened = await admin({"cmd": "ensure", "root": str(repo), "open": True})
     assert opened["ok"], opened
-    clamped = await admin({"cmd": "ensure", "root": str(repo)})
-    assert (clamped["id"], clamped["created"]) == (opened["id"], False)
-    assert clamped["key"] != opened["key"]
-    return opened["key"], clamped["key"]
+    listed = await admin({"cmd": "ls"})
+    clamped = next(s["key"] for s in listed["sessions"] if s["id"] == opened["id"])
+    assert clamped != opened["key"]
+    return opened["key"], clamped
 
 
 async def test_the_host_key_shows_a_file_outside_the_root(
@@ -156,4 +161,23 @@ async def test_a_clamped_key_shows_a_file_the_agent_wrote(
     )
     assert payload["refused"] == []
     assert payload["opened"] == [str(made)]
+    await wire.close()
+
+
+async def test_a_client_keeps_the_reach_of_the_key_it_connected_with(
+    running_broker: Path, repo: Path, tmp_path: Path
+) -> None:
+    """A host client presents the unclamped key once, at the hello, and names
+    no session after that. What it reaches must not fall back to the clamped
+    key the session also answers to."""
+    outside = tmp_path / "notes.md"
+    outside.write_text("what the agent is reading anyway\n")
+    host, _ = await keys(repo)
+    wire = await Wire.connect(paths.agent_socket(), key=host)
+
+    result = await wire.call("show", {"locations": [{"file": str(outside)}]})
+    assert not result.get("isError"), result
+    payload = json.loads(result["content"][0]["text"])
+    assert payload["refused"] == []
+    assert [Path(p).name for p in payload["opened"]] == ["notes.md"]
     await wire.close()

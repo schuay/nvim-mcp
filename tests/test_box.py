@@ -25,21 +25,17 @@ def box_args(root: Path) -> argparse.Namespace:
     return argparse.Namespace(root=str(root), clean=True, background=None)
 
 
-async def test_ensure_reuses_the_session_rooted_here(
+async def test_ensure_prepares_one_session_per_launch(
     running_broker: Path, repo: Path
 ) -> None:
+    """A launcher runs this on every start, and cannot know which conversation
+    it is starting. Reusing the session rooted here is what let one agent's
+    show land in the frames another had left behind in the same tree."""
     first = await admin({"cmd": "ensure", "root": str(repo)})
     again = await admin({"cmd": "ensure", "root": str(repo)})
-    assert first["created"] is True
-    # A launcher runs this on every start; a second agent in the same tree has
-    # to land in the editor the human already has open.
-    assert again["created"] is False
-    assert (again["id"], again["key"]) == (first["id"], first["key"])
-
-    elsewhere = repo / "src"
-    other = await admin({"cmd": "ensure", "root": str(elsewhere)})
-    assert other["created"] is True
-    assert other["id"] != first["id"]
+    assert again["id"] != first["id"]
+    assert again["key"] != first["key"]
+    assert (again["root"], first["root"]) == (str(repo), str(repo))
 
 
 def test_box_leaves_a_key_and_a_spec_that_binds_only_it(
@@ -57,7 +53,6 @@ def test_box_leaves_a_key_and_a_spec_that_binds_only_it(
             "id": "3",
             "key": "the-key",
             "root": request["root"],
-            "created": False,
         },
     )
     assert cli.cmd_box(box_args(repo)) == 0
@@ -66,7 +61,9 @@ def test_box_leaves_a_key_and_a_spec_that_binds_only_it(
     assert spec.parent == paths.box_dir()
     # stdout is what a launcher consumes, so nothing else may appear on it.
     assert captured.out.splitlines() == [str(spec)]
-    assert "attach with:  showme " in captured.err
+    # By the root, not the id: the session this prepared is not the one the
+    # agent lands on when it turns out to be resuming a conversation.
+    assert f"attach with:  showme {repo}" in captured.err
 
     directory = spec.parent / spec.stem
     body = spec.read_text()

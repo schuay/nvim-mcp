@@ -27,7 +27,11 @@ from .paths import state_dir
 log = logging.getLogger(__name__)
 
 #: 2: notes live in frames.
-VERSION = 2
+#: 3: a session belongs to a conversation rather than to a tree. State written
+#: before that has one session per tree, holding the frames of every
+#: conversation that ever worked there, and is set aside rather than carried
+#: over.
+VERSION = 3
 
 
 def path() -> Path:

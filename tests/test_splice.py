@@ -302,8 +302,6 @@ def test_a_host_client_takes_the_session_rooted_where_it_started(
     # the session rooted where it was started, over the admin socket that only
     # a host client can reach.
     assert (asked["cmd"], asked["root"]) == ("ensure", str(Path.cwd()))
-    # And without an editor, which starts with the first thing an agent shows.
-    assert asked["spawn"] is False
     # The key it takes reads outside the root: this client is the human, and
     # only the admin socket it just used can hand that key out.
     assert asked["open"] is True

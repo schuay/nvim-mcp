@@ -9,14 +9,21 @@ uv tool install git+https://github.com/schuay/showme-mcp
 showme install claude # or codex, gemini, opencode -- shows the change and asks
 ```
 
-Then ask your agent to show you something. It takes a session for the
-directory it was started in, nvim starts with the first thing it shows, and a
-window opens for it if `SHOWME_TERMINAL` names your terminal. There is
-nothing to start and no key to paste.
+Then ask your agent to show you something. It takes a session of its own,
+rooted at the directory it was started in; nvim starts with the first thing it
+shows, and a window opens for it if `SHOWME_TERMINAL` names your terminal.
+There is nothing to start and no key to paste.
 
-`showme new <root>` still makes a session by hand, `showme ls` lists them, and
-`showme 3` attaches a terminal to one. A sandboxed agent cannot reach that side
-at all, so its launcher passes it a key instead; see below.
+One session per conversation, not per directory: two agents working in one
+tree get one each, so neither annotates over the other. A conversation you
+resume picks its session up again where the harness publishes an id for it
+(Claude Code does), and otherwise starts clean. Sessions nobody is using are
+collected.
+
+`showme new <root>` still makes a session by hand and `showme ls` lists them.
+`showme 3` attaches a terminal to one, and `showme ~/src/thing` attaches to the
+one last used in a tree. A sandboxed agent cannot reach that side at all, so
+its launcher passes it a key instead; see below.
 
 The agent reaches the same session through MCP and puts code in front of you
 instead of quoting line numbers at you.
@@ -64,7 +71,8 @@ to a session with no terminal on it comes back saying nobody is watching and
 naming `showme 3`, which you run in a second shell on the same host; from then
 on the session is on your screen and shows land there. Run it before you ask
 for anything and there is nothing to hand over: the session exists from the
-moment the agent's client starts, so `showme ls` already lists it.
+moment the agent's client starts, so `showme ls` already lists it, and
+`showme <root>` reaches it without looking the id up.
 
 ## How it fits together
 

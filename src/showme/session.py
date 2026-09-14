@@ -3,12 +3,18 @@
 
 """Own one headless nvim and apply agent requests to it.
 
-The session outlives both the terminal a human attaches and the agent that
-writes to it. A key is the capability, and a session has two: the one a
-launcher hands a sandboxed client, clamped to the root the human chose, and
-the one only the admin socket gives out, which reads anywhere because the
-client holding it is the human. Which key a call arrived with decides what it
-may open; the session itself decides nothing.
+A session is one agent conversation's. Two agents started in the same tree get
+one each, and a conversation that is resumed is given back the one it had, so
+no set of frames is ever inherited by an agent that did not open it. The
+session outlives both the terminal a human attaches and the agent that writes
+to it: the review is usually read after the agent has stopped, which is why
+nothing ends a session at the moment its client goes away.
+
+A key is the capability, and a session has two: the one a launcher hands a
+sandboxed client, clamped to the root the human chose, and the one only the
+admin socket gives out, which reads anywhere because the client holding it is
+the human. Which key a call arrived with decides what it may open; the session
+itself decides nothing.
 
 The session is the record of what it shows and what the human has handed
 back. nvim draws that record and reports the two things only it can know:
@@ -26,6 +32,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import secrets
+import time
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass, field
 from importlib import resources
@@ -188,6 +195,17 @@ class Session:
     #: session sees the same PATH and display the human does. Kept for the
     #: respawn after `:q`.
     env: dict[str, str] | None = None
+    #: The conversation this session belongs to, as its client named itself
+    #: at the hello. A session is one agent's: two started in the same tree
+    #: are two conversations and get a session each, so neither writes into
+    #: the other's frames.
+    agent: str | None = None
+    #: Whether that name outlives the client process, which is what makes a
+    #: session resumable. A made-up one names this launch and nothing else.
+    stable: bool = False
+    #: When a client last held this session. Only meaningful once none does:
+    #: what the collector measures a detached session's age from.
+    last_seen: float = field(default_factory=time.time)
     #: What the session shows, bottom frame first, and what the human has
     #: handed back. nvim draws this; it does not own it.
     frames: list[Frame] = field(default_factory=list)
@@ -232,6 +250,20 @@ class Session:
             return Anywhere(self.root.path)
         return None
 
+    def touch(self) -> None:
+        self.last_seen = time.time()
+
+    def rekey(self, key: str, host_key: str) -> None:
+        """Answer to the keys of the launch that has just claimed this session.
+
+        A conversation outlives the launch that started it: resuming one mints
+        a fresh pair, and the session its client means is this one. The socket
+        keeps the name it was created with -- nvim is listening on it, and the
+        name only has to be unique.
+        """
+        self.key = key
+        self.host_key = host_key
+
     @classmethod
     def create(
         cls,
@@ -269,6 +301,9 @@ class Session:
             "clean": self.clean,
             "background": self.background,
             "env": self.env,
+            "agent": self.agent,
+            "stable": self.stable,
+            "last_seen": self.last_seen,
             "frames": [frame.state() for frame in self.frames],
             "marks": self.marks,
         }
@@ -287,9 +322,20 @@ class Session:
             # reconnects after a restart replays the one it was given.
             host_key=state.get("host_key"),
         )
+        session.agent = state.get("agent")
+        session.stable = bool(state.get("stable"))
+        session.last_seen = float(state.get("last_seen", time.time()))
         session.frames = [Frame.restore(frame) for frame in state.get("frames", [])]
         session.marks = list(state.get("marks", []))
         return session
+
+    @property
+    def showing(self) -> str:
+        """What the top frame holds, for a human picking between sessions."""
+        if not self.frames:
+            return ""
+        top = self.frames[-1]
+        return f"{top.letter}  {top.title} ({len(top.notes)})"
 
     @property
     def notes(self) -> list[Note]:

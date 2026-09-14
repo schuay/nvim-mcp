@@ -1,9 +1,9 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Two agents on one session. `showme box` reuses the session rooted at a tree,
-so a second box working there shares the human's editor rather than opening its
-own, and the two can call at the same moment."""
+"""Two agents working in one tree. They are two conversations, so they get a
+session each and neither can write into the other's frames; within one session,
+two calls that overlap still have to be answered separately."""
 
 from __future__ import annotations
 
@@ -42,21 +42,24 @@ async def test_overlapping_shows_each_get_their_own_notes(
     await session.close()
 
 
-async def test_two_clients_share_one_session(running_broker: Path, repo: Path) -> None:
+async def test_two_agents_in_one_tree_get_a_session_each(
+    running_broker: Path, repo: Path
+) -> None:
     created = await admin({"cmd": "ensure", "root": str(repo)})
     again = await admin({"cmd": "ensure", "root": str(repo)})
-    assert again["id"] == created["id"]
 
     one = await Wire.connect(paths.agent_socket(), key=created["key"])
     two = await Wire.connect(paths.agent_socket(), key=again["key"])
+    assert one.hello["session"] != two.hello["session"]
+
     results = await asyncio.gather(
         one.call("show", {"locations": [{"file": "src/main.c", "text": "from one"}]}),
-        two.call(
-            "show",
-            {"frame": "push", "locations": [{"file": "README.md", "text": "from two"}]},
-        ),
+        two.call("show", {"locations": [{"file": "README.md", "text": "from two"}]}),
     )
-    ids = [json.loads(r["content"][0]["text"])["ids"] for r in results]
-    assert ids[0] != ids[1], ids
+    shown = [json.loads(r["content"][0]["text"]) for r in results]
+    # Each starts its own frame at its own beginning. Sharing a session left
+    # the second agent continuing the first one's letter and numbering.
+    assert [s["ids"] for s in shown] == [["A1"], ["A1"]]
+    assert [len(s["frames"]) for s in shown] == [1, 1]
     await one.close()
     await two.close()
