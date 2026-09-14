@@ -144,3 +144,27 @@ async def test_ensure_applies_the_guard_and_new_does_not(
         assert session.root.path == loose
     finally:
         await session.close()
+
+
+async def test_a_clamped_key_is_never_issued_for_a_root_the_guard_refuses(
+    runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("HOME", str(tmp_path))
+    loose = tmp_path / "src"
+    loose.mkdir()
+    broker = Broker()
+
+    # A client on the host answers to no guard: the root is only where its
+    # relative paths are taken from, and it reads what the human reads anyway.
+    session, created = await broker.ensure_session(
+        str(loose), clean=True, spawn=False, unclamped=True
+    )
+    assert created is True
+    try:
+        # And a launcher does not inherit that root. Without this, `showme box`
+        # in a directory a host client got to first would hand a sandbox a key
+        # clamped to a root no launcher could have picked.
+        with pytest.raises(Refused, match="no repository"):
+            await broker.ensure_session(str(loose))
+    finally:
+        await session.close()

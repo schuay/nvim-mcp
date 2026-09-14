@@ -4,8 +4,11 @@
 """Own one headless nvim and apply agent requests to it.
 
 The session outlives both the terminal a human attaches and the agent that
-writes to it. Its id is the capability: it is created on the host with a root
-the human chooses, and holding the id is what authorizes a client to use it.
+writes to it. A key is the capability, and a session has two: the one a
+launcher hands a sandboxed client, clamped to the root the human chose, and
+the one only the admin socket gives out, which reads anywhere because the
+client holding it is the human. Which key a call arrived with decides what it
+may open; the session itself decides nothing.
 
 The session is the record of what it shows and what the human has handed
 back. nvim draws that record and reports the two things only it can know:
@@ -29,7 +32,7 @@ from importlib import resources
 from pathlib import Path
 from typing import Any
 
-from .clamp import Refused, Root
+from .clamp import Anywhere, Refused, Root
 from .lifecycle import Editor
 from .nvimrpc import NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
@@ -167,6 +170,12 @@ class Frame:
 class Session:
     sid: str
     key: str
+    #: The key a client takes for itself over the admin socket, which reads
+    #: outside the root. Never printed: `ls`, `new` and `box` all hand out the
+    #: clamped one, so there is nowhere to copy this from into a box.
+    host_key: str
+    #: Where a relative path is taken from and what nvim runs in. The boundary
+    #: for a clamped key, and only a base for the other.
     root: Root
     socket: Path
     #: Start nvim without the human's config. Their plugins run in this session
@@ -208,6 +217,18 @@ class Session:
     def rpc(self) -> NvimRPC | None:
         return self.editor.rpc
 
+    def authorize(self, key: str) -> Root | None:
+        """Return what `key` reaches here, or None if it is not one of ours.
+
+        Both keys are compared without an early exit: the short id alone is
+        guessable, and the secret is what authorizes.
+        """
+        if secrets.compare_digest(key, self.key):
+            return self.root
+        if secrets.compare_digest(key, self.host_key):
+            return Anywhere(self.root.path)
+        return None
+
     @classmethod
     def create(
         cls,
@@ -218,6 +239,7 @@ class Session:
         background: str | None = None,
         env: dict[str, str] | None = None,
         key: str | None = None,
+        host_key: str | None = None,
     ) -> Session:
         # The short id is for humans to type; the secret is what authorizes.
         key = key or f"{sid}-{secrets.token_hex(12)}"
@@ -227,6 +249,7 @@ class Session:
             background=background,
             env=env,
             key=key,
+            host_key=host_key or f"{sid}-{secrets.token_hex(12)}",
             root=Root.of(root),
             # Name the socket after the key, not the reusable id. nvim unlinks
             # its listen socket when it exits, and a dying predecessor sharing
@@ -238,6 +261,7 @@ class Session:
         return {
             "sid": self.sid,
             "key": self.key,
+            "host_key": self.host_key,
             "root": str(self.root.path),
             "clean": self.clean,
             "background": self.background,
@@ -255,6 +279,10 @@ class Session:
             background=state.get("background"),
             env=state.get("env"),
             key=state["key"],
+            # A file written before there were two keys gets a fresh one. No
+            # client can be holding the key it never had, and a splice that
+            # reconnects after a restart replays the one it was given.
+            host_key=state.get("host_key"),
         )
         session.frames = [Frame.restore(frame) for frame in state.get("frames", [])]
         session.marks = list(state.get("marks", []))

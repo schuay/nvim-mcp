@@ -20,6 +20,10 @@ from showme import broker, paths
 def repo(tmp_path: Path) -> Path:
     root = tmp_path / "repo"
     (root / "src").mkdir(parents=True)
+    # `ensure` refuses a root with no repository at or above it, and a stray
+    # .git anywhere above the temporary directory would otherwise decide
+    # whether a test exercises that.
+    (root / ".git").mkdir()
     (root / "src" / "main.c").write_text("int main(void) { return 0; }\n" * 20)
     (root / "README.md").write_text("hello\n")
     return root

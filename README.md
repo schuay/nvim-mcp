@@ -90,14 +90,19 @@ next starts, which `:q` does.
 
 - No command writes a file, saves a buffer, or edits buffer text. The agent
   edits on disk with its own tools, and the broker reloads unmodified buffers.
-- Every read an agent asks for is clamped to the session's root. A human mark
-  is the one exception, because only the human creates one.
+- A sandboxed agent reads only inside the session's root. An agent on the host
+  is not held to it: it reads your files with its own tools and edits them
+  there, so a clamp would only refuse it the worktree next door. The root still
+  says where its relative paths are taken from and where nvim runs. A human
+  mark is outside both, because only the human creates one.
 - No agent-supplied string reaches an Ex command line. A file named
   ``a`touch /tmp/x`.c`` runs the shell through `:edit` and through
   `nvim_cmd`'s structured arguments alike, so paths are opened with `bufadd`.
 - The session key is the capability. `showme new` sets the root on the host and
   prints an unguessable key; handing that key to an agent is what lets it use
-  the session.
+  the session. Every key you can see is clamped to the root. The one that is
+  not belongs to a client that asked for it over the admin socket, which no
+  sandbox can reach -- reaching it is the proof that the client is you.
 
 ## From a sandbox
 

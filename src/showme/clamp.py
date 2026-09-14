@@ -8,6 +8,11 @@ the root its session was created for. Symlinks resolve before the check, so a
 link planted inside the root cannot point at a credential elsewhere, and a path
 outside it is refused before anything is stat'd, so the refusals cannot be read
 as an answer to whether a file elsewhere exists.
+
+The boundary binds a key rather than a session, which is why `Anywhere` is
+here too: a client that took its key over the admin socket runs as the human
+and there is nothing to confine it to. Both kinds resolve the same way, so the
+callers do not know which one they hold.
 """
 
 from __future__ import annotations
@@ -24,6 +29,11 @@ class Refused(ValueError):
 @dataclass(frozen=True)
 class Root:
     path: Path
+
+    #: Which reach a key bound to this one has. The broker logs it: a
+    #: connection says nothing about whether its client is sandboxed, and the
+    #: key it presented is the closest thing to an answer.
+    scope = "root"
 
     @classmethod
     def of(cls, raw: str | Path) -> Root:
@@ -65,16 +75,40 @@ class Root:
         root check is the boundary and is unchanged; only the assertion that
         something is there is left to the caller.
         """
-        candidate = Path(raw)
-        if not candidate.is_absolute():
-            candidate = self.path / candidate
-        try:
-            resolved = candidate.resolve()
-        except OSError as e:
-            raise Refused(f"cannot resolve: {e.strerror or e}") from e
+        resolved = self._under(raw)
         if resolved != self.path and self.path not in resolved.parents:
             raise Refused("outside the session root")
         return resolved
 
+    def _under(self, raw: str) -> Path:
+        """Return where `raw` points, taking a relative path against this root."""
+        candidate = Path(raw)
+        if not candidate.is_absolute():
+            candidate = self.path / candidate
+        try:
+            return candidate.resolve()
+        except OSError as e:
+            raise Refused(f"cannot resolve: {e.strerror or e}") from e
+
     def contains(self, resolved: Path) -> bool:
         return resolved == self.path or self.path in resolved.parents
+
+
+class Anywhere(Root):
+    """A root that is a base to resolve against and not a boundary.
+
+    What the key issued over the admin socket reaches. That client runs as the
+    human: it reads their files with its own tools and edits them there, so
+    refusing it the header next door or the sibling worktree confines nothing
+    and only makes the tools useless for the work they are for. The path still
+    matters -- it is what a relative path is taken against, and nvim's cwd, so
+    a note and a `:Ref` keep naming files the way the two of them do.
+    """
+
+    scope = "open"
+
+    def locate(self, raw: str) -> Path:
+        return self._under(raw)
+
+    def contains(self, resolved: Path) -> bool:
+        return True

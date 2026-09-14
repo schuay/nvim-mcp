@@ -8,9 +8,10 @@ client can put code in front of the human and read what the human is looking
 at, and nothing else. Sessions are addressed by their secret key, because the
 broker cannot tell one sandboxed client from another.
 
-Every read an agent asks for is clamped to the session root. A mark is the one
-exception: only the human makes one, and `:Ask` on a range is them handing it
-over deliberately.
+What a read may reach comes from the key it arrived with, not from the session:
+a sandboxed client is clamped to the session root, and a client that took its
+key on the host reads what the human reads. A mark is outside both: only the
+human makes one, and `:Ask` on a range is them handing it over deliberately.
 """
 
 from __future__ import annotations
@@ -29,7 +30,7 @@ from mcp.shared.message import SessionMessage
 from pydantic import ValidationError
 
 from . import models
-from .clamp import Refused
+from .clamp import Refused, Root
 from .models import (
     Buffer,
     Cursor,
@@ -59,8 +60,8 @@ SHOW_TOOL = types.Tool(
         "pointed at code -- 'show me the parser', 'open that in nvim', 'where "
         "does this happen' -- and whenever your answer is about particular "
         "lines they would rather read in place than in chat. Opening a tab "
-        "they did not ask for is the thing to avoid: this is for code in their "
-        "session root, not for quoting a value or a command back to them. "
+        "they did not ask for is the thing to avoid: this is for code the two of "
+        "you are discussing, not for quoting a value or a command back to them. "
         "It opens a tab per file, fills the quickfix list with the positions, "
         "highlights any range, and renders each note above its line under an "
         "id like A2 that you and the human can both say. Batch every location "
@@ -88,13 +89,14 @@ READ_TOOL = types.Tool(
         "buffer, including edits they have not saved. 'tabs' lists what is "
         "open. 'notes' gives back the frames and the text of every note on "
         "screen, which is how an agent that did not write them learns what "
-        "A2 says. Everything but 'marks' is limited to the session root."
+        "A2 says. Everything but 'marks' is limited to what this session's "
+        "key reaches, which for a sandboxed agent is the session root."
     ),
     input_schema=models.schema(ReadRequest),
     output_schema=models.schema(ReadResult),
 )
 
-SessionLookup = Callable[[str], Session | None]
+SessionLookup = Callable[[str], tuple[Session, Root] | None]
 
 
 def pending(session: Session) -> list[dict[str, Any]]:
@@ -118,13 +120,13 @@ def _envelope(session: Session, attached: bool) -> dict[str, Any]:
     }
 
 
-async def _show(session: Session, request: ShowRequest) -> ShowResult:
+async def _show(session: Session, root: Root, request: ShowRequest) -> ShowResult:
     locations, refused = [], []
     for spec in request.locations:
         try:
             # Resolve once. The path that goes to nvim is the one that passed
             # the clamp, so there is no second resolution to disagree with it.
-            resolved = session.root.resolve(spec.file)
+            resolved = root.resolve(spec.file)
         except Refused as e:
             # One bad path does not spoil the rest of a review.
             refused.append(Refusal(file=spec.file, reason=str(e)))
@@ -173,7 +175,7 @@ async def _show(session: Session, request: ShowRequest) -> ShowResult:
     )
 
 
-async def _read(session: Session, request: ReadRequest) -> ReadResult:
+async def _read(session: Session, root: Root, request: ReadRequest) -> ReadResult:
     acknowledged = set(request.ack)
     for mark in session.marks:
         if mark.get("id") in acknowledged:
@@ -189,7 +191,7 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
         # Located, not resolved: a buffer the human is editing outlives the
         # file, and an agent that just renamed it is the likeliest reason to
         # be asking. Whether anything is there is settled after nvim answers.
-        target = session.root.locate(request.file)
+        target = root.locate(request.file)
         options = {
             "file": str(target),
             "start_line": request.start_line,
@@ -222,7 +224,7 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
     if request.what == "cursor":
         state = result.get("cursor") or {}
         cursor = (
-            Cursor.model_validate(state) if _within(session, state) else _outside(state)
+            Cursor.model_validate(state) if _within(root, state) else _outside(state)
         )
         return ReadResult(**envelope, cursor=cursor)
     if request.what == "range":
@@ -231,22 +233,20 @@ async def _read(session: Session, request: ReadRequest) -> ReadResult:
             if not target.is_file():
                 raise Refused("no such file, and no buffer holding it")
             return ReadResult(**envelope, range=NotOpen(open=False, file=str(target)))
-        span = (
-            Range.model_validate(state) if _within(session, state) else _outside(state)
-        )
+        span = Range.model_validate(state) if _within(root, state) else _outside(state)
         return ReadResult(**envelope, range=span)
     buffers = [
         Buffer.model_validate(state)
         for state in result.get("buffers") or []
-        if _within(session, state)
+        if _within(root, state)
     ]
     return ReadResult(**envelope, buffers=buffers)
 
 
-def _within(session: Session, state: dict[str, Any]) -> bool:
+def _within(root: Root, state: dict[str, Any]) -> bool:
     """Whether the agent may be told about this buffer.
 
-    The human can navigate anywhere; the agent may only be told about what is
+    The human can navigate anywhere; a clamped key hears only about what is
     inside the root it was given.
     """
     file = state.get("file")
@@ -255,7 +255,7 @@ def _within(session: Session, state: dict[str, Any]) -> bool:
     try:
         # Where it is, not whether it is there: nvim is reporting a buffer it
         # holds, which may no longer have a file behind it.
-        return session.root.contains(session.root.locate(file))
+        return root.contains(root.locate(file))
     except Refused:
         return False
 
@@ -296,8 +296,8 @@ def build(
         except ValidationError as e:
             return _error(models.invalid(e.errors()))
         key = request.session or default_key
-        session = lookup(key) if key else None
-        if session is None:
+        found = lookup(key) if key else None
+        if found is None:
             return _error(
                 "no such session. Ask the human to run `showme new <root>` and "
                 "paste the key it prints."
@@ -306,12 +306,13 @@ def build(
                 "without one -- ask the human to run `showme new <root>` in the "
                 "directory they want you looking at, and paste the key."
             )
+        session, root = found
         try:
             payload: Envelope
             if isinstance(request, ShowRequest):
-                payload = await _show(session, request)
+                payload = await _show(session, root, request)
             else:
-                payload = await _read(session, request)
+                payload = await _read(session, root, request)
         except Refused as e:
             return _error(str(e))
         except Exception as e:

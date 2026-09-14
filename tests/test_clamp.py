@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from showme.clamp import Refused, Root
+from showme.clamp import Anywhere, Refused, Root
 
 
 def test_resolves_a_path_inside_the_root(repo: Path) -> None:
@@ -58,3 +58,29 @@ def test_does_not_expand_a_tilde(repo: Path) -> None:
 def test_refuses_a_root_that_is_not_a_directory(repo: Path) -> None:
     with pytest.raises(Refused, match="not a directory"):
         Root.of(repo / "README.md")
+
+
+def test_anywhere_reads_outside_its_base(repo: Path, tmp_path: Path) -> None:
+    outside = tmp_path / "secret"
+    outside.write_text("token\n")
+    (repo / "link.c").symlink_to(outside)
+    root = Anywhere.of(repo)
+
+    assert root.resolve(str(outside)) == outside.resolve()
+    assert root.resolve("../secret") == outside.resolve()
+    assert root.resolve("link.c") == outside.resolve()
+    # Still where a relative path is taken from, and still what a buffer is
+    # measured against when the agent is told what is open.
+    assert root.resolve("src/main.c") == (repo / "src" / "main.c").resolve()
+    assert root.contains(outside.resolve())
+
+
+def test_anywhere_still_refuses_what_is_not_a_file(repo: Path) -> None:
+    # The boundary is what it drops. A directory or a path that is not there
+    # is a mistake the agent has to hear about either way.
+    with pytest.raises(Refused, match="regular file"):
+        Anywhere.of(repo).resolve("src")
+    with pytest.raises(Refused, match="no such file"):
+        Anywhere.of(repo).resolve("nope.c")
+    with pytest.raises(Refused, match="not a directory"):
+        Anywhere.of(repo / "README.md")

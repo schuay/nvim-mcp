@@ -7,6 +7,11 @@ One broker per user, held by a lock file. It listens on two sockets: an admin
 socket for `showme`, which creates and kills sessions, and an agent socket
 carrying MCP. Only the agent socket is meant to be reachable from a sandbox, so
 session administration stays off the surface a sandboxed client can see.
+
+Reaching the admin socket is itself the proof that a client is on the host,
+which is what lets it take the key that reads outside its session's root. A
+sandboxed one never gets to make the claim: its key is put where it will find
+it by a launcher running out here.
 """
 
 from __future__ import annotations
@@ -16,13 +21,12 @@ import contextlib
 import fcntl
 import json
 import logging
-import secrets
 import shutil
 from pathlib import Path
 from typing import Any
 
 from . import mcpserver, paths, splice, store
-from .clamp import Refused
+from .clamp import Refused, Root
 from .session import Session
 
 log = logging.getLogger(__name__)
@@ -42,9 +46,9 @@ def _guard_root(root: Path) -> None:
     """Refuse a root a launcher should never have picked on its own.
 
     `showme new` takes what the human typed. `showme ensure` takes the
-    directory they happened to be standing in, and the session root is a second
-    access list: an agent reads everything under it through the broker,
-    whatever its sandbox mounts.
+    directory they happened to be standing in, and for the key it hands a
+    sandboxed agent the root is a second access list: that agent reads
+    everything under it through the broker, whatever its sandbox mounts.
 
     It catches a home directory and a tree with no repository at or above it,
     which is usually a parent holding several. It does not catch a repository
@@ -111,12 +115,12 @@ class Broker:
             if self.sessions:
                 log.info("restored %d session(s)", len(self.sessions))
 
-    def session_by_key(self, key: str) -> Session | None:
+    def session_by_key(self, key: str) -> tuple[Session, Root] | None:
+        """Return the session `key` names and what that key reaches in it."""
         for session in self.sessions.values():
-            # The whole key, compared without an early exit: the short id alone
-            # is guessable, and the secret authorizes.
-            if key and secrets.compare_digest(key, session.key):
-                return session
+            root = session.authorize(key) if key else None
+            if root is not None:
+                return session, root
         return None
 
     async def new_session(
@@ -135,7 +139,9 @@ class Broker:
         clean: bool = False,
         background: str | None = None,
         env: dict[str, str] | None = None,
+        *,
         spawn: bool = True,
+        unclamped: bool = False,
     ) -> tuple[Session, bool]:
         """Return the session already rooted here, or make one.
 
@@ -144,12 +150,21 @@ class Broker:
         opening an editor nobody is looking at. The lookup and the create share
         one lock: two launchers racing in the same tree must not end up with a
         session each.
+
+        `unclamped` asks for the key that reads outside the root, which only a
+        client on the host can ask for and which the guard has no say over.
         """
         async with self._lock:
+            # A clamped key is only ever issued for a root the guard allows,
+            # whether this call makes the session or finds one: a host client
+            # answers to no guard, and a launcher must not inherit the root it
+            # picked. `showme new` still sets any root the human names, and
+            # prints the key for them to pass on by hand.
+            if not unclamped:
+                _guard_root(Path(root))
             for session in self.sessions.values():
                 if str(session.root.path) == root:
                     return session, False
-            _guard_root(Path(root))
             return await self._create(root, clean, background, env, spawn), True
 
     async def _create(
@@ -258,16 +273,21 @@ async def _new(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
 
 
 async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
+    # Only a client that reached this socket can ask for the key that reads
+    # outside the root, and reaching it is the proof: the admin socket lives in
+    # the runtime directory, which no sandbox mounts.
+    unclamped = bool(request.get("open"))
     session, created = await broker.ensure_session(
         request["root"],
         bool(request.get("clean")),
         request.get("background"),
         request.get("env"),
         spawn=bool(request.get("spawn", True)),
+        unclamped=unclamped,
     )
     return {
         "id": session.sid,
-        "key": session.key,
+        "key": session.host_key if unclamped else session.key,
         "root": str(session.root.path),
         "socket": str(session.socket),
         "created": created,
@@ -353,15 +373,20 @@ async def _hello(
     if not isinstance(opening, dict) or splice.HELLO not in opening:
         return _Pushback(reader, line), None
     key = str(opening[splice.HELLO].get("key") or "")
-    session = broker.session_by_key(key)
-    answer: dict[str, Any] = {"ok": session is not None}
-    if session is not None:
+    found = broker.session_by_key(key)
+    answer: dict[str, Any] = {"ok": found is not None}
+    if found is not None:
+        session, root = found
         answer["session"] = session.sid
+        # Nothing about the connection says whether this client is sandboxed,
+        # and nothing here needs to: which key it presented is what it reaches,
+        # and is the only account of it worth keeping.
+        log.info("session %s: client holds the %s key", session.sid, root.scope)
     else:
         answer["error"] = "no such session"
     writer.write(json.dumps({splice.HELLO: answer}).encode() + b"\n")
     await writer.drain()
-    return reader, key if session is not None else None
+    return reader, key if found is not None else None
 
 
 async def _agent_client(

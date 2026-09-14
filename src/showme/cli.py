@@ -3,10 +3,13 @@
 
 """`showme`: create sessions, attach a terminal to one, and inspect them.
 
-Sessions are created here rather than by a client, because the root a session is
-clamped to has to come from the human. This shell's environment goes along, so
-the session's nvim finds the same language servers and display the human's
-everyday one does; the broker that spawns it was started from some other shell.
+Sessions are created here rather than by a client, because the root a launcher
+clamps an agent to has to come from the human. This is also where a client on
+the host takes the key that reads outside that root: it asks over the admin
+socket, and being able to reach it is the proof. This shell's environment goes
+along, so the session's nvim finds the same language servers and display the
+human's everyday one does; the broker that spawns it was started from some
+other shell.
 """
 
 from __future__ import annotations
@@ -266,6 +269,11 @@ def _session_here() -> str | None:
     sandbox mounts -- the same split that keeps session administration off the
     surface a box can reach. The session is recorded without starting nvim, so
     an agent that never shows anything costs nothing.
+
+    The key it comes back with reads outside the root, because this client is
+    the human: it reads their files with its own tools either way, and a clamp
+    here would only refuse it the worktree next door. The root still says where
+    relative paths are taken from and where nvim runs.
     """
     try:
         _ensure_broker()
@@ -275,6 +283,7 @@ def _session_here() -> str | None:
                 "root": str(Path.cwd()),
                 "env": session_env(),
                 "spawn": False,
+                "open": True,
             }
         )
     except (OSError, RuntimeError, SystemExit):
