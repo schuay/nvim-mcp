@@ -115,6 +115,11 @@ class Location:
 #: bottom frame dropped, and the cap is what keeps notes from pushing the code
 #: off the screen.
 FRAME_LIMIT = 4
+
+#: How many launches' keys a session goes on answering to. One is the common
+#: case; more than one only while a harness has two clients of a conversation
+#: connected at once, or has just restarted its MCP server.
+LAUNCHES_REMEMBERED = 8
 FRAME_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
 
@@ -214,6 +219,9 @@ class Session:
     #: The collector leaves it alone: they made it by hand, it holds whatever
     #: they have been doing in it, and `showme kill` is how it ends.
     human: bool = False
+    #: Prepared for a launch that turned out to be resuming a conversation
+    #: with a session already. It answers to nothing and is on its way out.
+    released: bool = False
     #: What the session shows, bottom frame first, and what the human has
     #: handed back. nvim draws this; it does not own it.
     frames: list[Frame] = field(default_factory=list)
@@ -264,6 +272,16 @@ class Session:
         """Every key pair this session answers to, the first one first."""
         return [(self.key, self.host_key), *(tuple(p) for p in self.also)]  # type: ignore[misc]
 
+    @property
+    def spare(self) -> bool:
+        """Whether this is a prepared session nobody has made anything of.
+
+        What a launcher leaves behind when it cannot know the conversation it
+        is starting. Anything else a key names was meant: the session the
+        human made by hand, or one a conversation is already on.
+        """
+        return not (self.agent or self.frames or self.human or self.released)
+
     def touch(self) -> None:
         self.last_seen = time.time()
 
@@ -278,6 +296,10 @@ class Session:
         """
         if (key, host_key) not in self.pairs:
             self.also.append([key, host_key])
+            # A conversation resumed many times would otherwise carry a pair
+            # for every launch it ever had. The clients of the older ones are
+            # long gone; only the recent few can still be holding one.
+            del self.also[:-LAUNCHES_REMEMBERED]
 
     def revoke(self) -> None:
         """Answer to nothing any client holds.
@@ -302,12 +324,14 @@ class Session:
         key: str | None = None,
         host_key: str | None = None,
         socket: Path | None = None,
+        human: bool = False,
     ) -> Session:
         # The short id is for humans to type; the secret is what authorizes.
         key = key or f"{sid}-{secrets.token_hex(12)}"
         return cls(
             sid=sid,
             clean=clean,
+            human=human,
             background=background,
             env=env,
             key=key,
@@ -336,6 +360,7 @@ class Session:
             "agent": self.agent,
             "stable": self.stable,
             "human": self.human,
+            "released": self.released,
             "also": self.also,
             "last_seen": self.last_seen,
             "frames": [frame.state() for frame in self.frames],
@@ -355,13 +380,14 @@ class Session:
             # client can be holding the key it never had, and a splice that
             # reconnects after a restart replays the one it was given.
             host_key=state.get("host_key"),
-            # Absent in state written before a session could answer to more
-            # than one pair, when the key it went by could not change.
+            # Absent only in state this cannot be given: a file old enough
+            # not to carry it is set aside by the version check.
             socket=Path(state["socket"]) if state.get("socket") else None,
         )
         session.agent = state.get("agent")
         session.stable = bool(state.get("stable"))
         session.human = bool(state.get("human"))
+        session.released = bool(state.get("released"))
         session.also = [list(pair) for pair in state.get("also", [])]
         # Taken as contact: which clients are connected is not saved, and a
         # broker that crashed leaves a timestamp as old as the last hello. The

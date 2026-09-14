@@ -31,7 +31,10 @@ log = logging.getLogger(__name__)
 #: before that has one session per tree, holding the frames of every
 #: conversation that ever worked there, and is set aside rather than carried
 #: over.
-VERSION = 3
+#: 4: a session records the socket its nvim is listening on. A v3 file has a
+#: session that may have changed the key its socket was named after, leaving
+#: nothing to work the path out from.
+VERSION = 4
 
 
 def path() -> Path:

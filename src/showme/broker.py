@@ -178,9 +178,7 @@ class Broker:
         included -- and `showme kill` is what ends one.
         """
         async with self._lock:
-            session = await self._create(root, clean, background, env)
-            session.human = True
-            return session
+            return await self._create(root, clean, background, env, human=True)
 
     async def launch_session(
         self,
@@ -233,19 +231,21 @@ class Broker:
                 # and nothing more: with no conversation to speak of, there is
                 # nothing to hand back to it later.
                 return Claim(key, prepared, root)
-            if prepared.agent not in (None, agent):
-                # Another conversation is on it. Handing it over would put two
-                # conversations in one frame stack, which is the thing a
-                # session being one conversation's is for.
-                return None
             session = prepared
-            mine = self._session_of(agent, besides=prepared)
-            if mine is not None:
-                for pair in prepared.pairs:
-                    mine.accept(*pair)
-                root = mine.authorize(key) or root
-                await self._release(prepared)
-                session = mine
+            if prepared.spare:
+                # Only a session a launcher prepared and nobody has used is
+                # exchanged for the one this conversation is really on. A key
+                # that names anything else was pointed at deliberately -- the
+                # human handing out what `showme new` printed, or a client
+                # reconnecting to the session its own launch was given -- and
+                # the key is the capability, so it is taken at its word.
+                mine = self._session_of(agent, besides=prepared)
+                if mine is not None:
+                    for pair in prepared.pairs:
+                        mine.accept(*pair)
+                    root = mine.authorize(key) or root
+                    self._release(prepared)
+                    session = mine
             session.agent, session.stable = agent, stable
             session.touch()
             self.save()
@@ -270,20 +270,19 @@ class Broker:
             None,
         )
 
-    async def _release(self, session: Session) -> None:
+    def _release(self, session: Session) -> None:
         """Let go of a session the conversation that asked for it did not need.
 
-        Usually it was never shown anything and goes now. But a human can
-        attach to a prepared session by its root before the agent connects --
-        over ssh that is what they are told to do -- and stopping its nvim
-        would take their terminal with it. That one keeps its editor and loses
-        its keys, so nothing resolves to it, and waits for the collector.
+        It loses its keys, so nothing can reach it, and the collector takes it
+        on its next pass. Not stopped here: a human can attach to a prepared
+        session by its root before the agent connects -- over ssh that is what
+        they are told to do -- and an attach that has started but not yet
+        drawn its nvim looks from here exactly like one that never happened.
+        The collector is the one caller that asks nvim rather than guessing,
+        and it already leaves a session with a terminal on it alone.
         """
-        if session.frames or session.alive:
-            session.revoke()
-            return
-        self.sessions.pop(session.sid, None)
-        await session.close()
+        session.revoke()
+        session.released = True
 
     async def _create(
         self,
@@ -291,10 +290,14 @@ class Broker:
         clean: bool,
         background: str | None,
         env: dict[str, str] | None,
+        *,
         spawn: bool = True,
+        human: bool = False,
     ) -> Session:
         sid = self._next_id()
-        session = Session.create(sid, root, clean=clean, background=background, env=env)
+        session = Session.create(
+            sid, root, clean=clean, background=background, env=env, human=human
+        )
         session.on_change = self.save
         # Without `spawn` the session is only recorded: an agent that never
         # shows anything should not cost the human an editor process.
@@ -315,6 +318,9 @@ class Broker:
             session = self.sessions.pop(sid, None)
             if session is None:
                 return False
+            # The id is handed out again, and a hold left behind would keep
+            # the next session to take it from ever being collected.
+            self.held.pop(sid, None)
             await session.close()
             self.save()
             return True
@@ -342,11 +348,19 @@ class Broker:
         rooted = [
             session
             for session in self.sessions.values()
-            if session.root.path == wanted or session.root.path in wanted.parents
+            if not session.released
+            and (session.root.path == wanted or session.root.path in wanted.parents)
         ]
+        # A session an agent is connected to outranks one merely left open:
+        # the collector touches a session it finds a terminal on, so age alone
+        # would offer yesterday's abandoned review over today's work.
         return max(
             rooted,
-            key=lambda s: (len(s.root.path.parts), s.last_seen),
+            key=lambda s: (
+                len(s.root.path.parts),
+                bool(self.held.get(s.sid)),
+                s.last_seen,
+            ),
             default=None,
         )
 
@@ -413,6 +427,10 @@ class Broker:
     def _is_stale(self, session: Session) -> bool:
         if session.human or self.held.get(session.sid):
             return False
+        if session.released:
+            # Nothing holds a key to it and nothing will: the only question
+            # left is whether a terminal is on it, which the caller asks.
+            return True
         age = time.time() - session.last_seen
         if age < 0:
             # The clock moved backwards. Taking it as contact costs a session

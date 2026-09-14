@@ -22,7 +22,8 @@ from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
 from showme import broker as broker_module
-from showme import cli, paths, splice
+from showme import cli, paths, splice, store
+from showme import session as session_module
 from showme.broker import Broker
 from showme.nvimrpc import NvimError, NvimRPC
 from showme.session import Session
@@ -92,8 +93,14 @@ async def test_a_resumed_conversation_is_given_its_session_back(
     assert two.hello["session"] == one.hello["session"]
     assert await notes_of(two) == ["from the first run"]
 
-    # And the session the second launch prepared is gone: it was never shown
-    # anything, and leaving it would be the pile this change is about.
+    # And the session the second launch prepared answers to nothing and is
+    # taken on the collector's next pass: leaving it would be the pile this
+    # change is about.
+    broker = await running_broker_object()
+    spare = broker.sessions[second["id"]]
+    assert spare.released
+    assert broker.session_by_key(second["key"])[0].sid == one.hello["session"]
+    await broker.collect()
     listing = await admin({"cmd": "ls"})
     assert [s["id"] for s in listing["sessions"]] == [one.hello["session"]]
     await two.close()
@@ -309,23 +316,45 @@ async def test_a_conversation_keeps_its_session_when_a_second_client_connects(
     await two.close()
 
 
-async def test_a_key_another_conversation_is_on_is_refused(
+async def test_a_client_whose_server_restarted_keeps_its_conversation(
     running_broker: Path, repo: Path
 ) -> None:
-    """One key handed to two conversations used to merge them into one frame
-    stack, which is what a session being one conversation's is for."""
+    """A harness with no session id to publish names each client process
+    instead, so restarting its MCP server mid-conversation presents the same
+    key under a new name. Refusing that left the conversation with no session
+    for the rest of its life."""
     first = await launch(repo)
-    one = await Wire.connect(
-        paths.agent_socket(), key=first["key"], agent="one:1", stable=True
-    )
-    await show(one, "src/main.c", "mine")
-
-    two = await Wire.connect(
-        paths.agent_socket(), key=first["key"], agent="two:2", stable=True
-    )
-    assert two.hello == {"ok": False, "error": "no such session"}
+    one = await Wire.connect(paths.agent_socket(), key=first["key"])
+    await show(one, "src/main.c", "before the restart")
     await one.close()
+
+    # The same box, the same key, a new process with a new name.
+    two = await Wire.connect(paths.agent_socket(), key=first["key"])
+    assert two.hello["session"] == one.hello["session"]
+    assert await notes_of(two) == ["before the restart"]
     await two.close()
+
+
+async def test_a_key_the_human_handed_out_names_the_session_they_made(
+    runtime: Path, repo: Path
+) -> None:
+    """`showme new` prints a key to hand to an agent. A conversation that
+    already had a session went on using that one, and -- worse -- the key the
+    human was holding quietly started naming it too."""
+    broker = Broker()
+    launched = await broker.launch_session(str(repo), clean=True)
+    await broker.claim(launched.key, CLAUDE, True)
+    handmade = await broker.new_session(str(repo), clean=True)
+    try:
+        claimed = await broker.claim(handmade.key, CLAUDE, True)
+        assert claimed is not None
+        assert claimed.session is handmade
+        # And it is still the human's: theirs to kill, not the collector's.
+        assert broker.session_by_key(handmade.key)[0] is handmade
+        assert handmade.human and not handmade.released
+    finally:
+        for session in list(broker.sessions.values()):
+            await session.close()
 
 
 async def test_a_resumed_conversation_in_another_tree_gets_its_own_session(
@@ -572,3 +601,116 @@ async def test_a_listing_does_not_wait_on_an_nvim_that_is_busy(
     assert [s["id"] for s in listing["sessions"]] == [reply["id"]]
     assert listing["sessions"][0]["attached"] is False
     del session.attached  # type: ignore[attr-defined]
+
+
+async def test_a_resume_does_not_race_an_attach_that_has_started(
+    runtime: Path, repo: Path
+) -> None:
+    """Over ssh the human attaches before asking for anything, which lands
+    them on the session the launch prepared. Stopping it the moment the agent
+    connects raced their terminal: nvim had been asked for but had not drawn
+    yet, so the session did not look alive."""
+    broker = Broker()
+    mine = await broker.launch_session(str(repo), clean=True)
+    mine.agent, mine.stable = CLAUDE, True
+    spare = await broker.launch_session(str(repo), clean=True)
+
+    attaching = asyncio.create_task(broker.attach(str(repo)))
+    await asyncio.sleep(0)  # the attach has started; nvim has not answered yet
+    claimed = await broker.claim(spare.key, CLAUDE, True)
+    assert claimed is not None and claimed.session is mine
+    await attaching
+    try:
+        # The editor the human is on the way into is still there, and the
+        # collector is what decides its fate once it can ask about the UI.
+        assert spare.alive
+        await broker.collect()
+        assert spare.sid not in broker.sessions, "an empty spare should go"
+    finally:
+        for session in list(broker.sessions.values()):
+            await session.close()
+        await spare.close()
+
+
+async def test_a_released_session_is_not_what_a_tree_means(
+    runtime: Path, repo: Path
+) -> None:
+    broker = Broker()
+    kept = await broker.launch_session(str(repo), clean=True)
+    kept.agent, kept.stable = CLAUDE, True
+    spare = await broker.launch_session(str(repo), clean=True)
+    await broker.claim(spare.key, CLAUDE, True)
+    # The most recently made session in the tree, and the one a human would
+    # be offered by age alone -- but it answers to nothing and is on its way
+    # out, so attaching to it would show them an editor nothing can reach.
+    spare.touch()
+    assert spare.released
+    assert broker.session_in(str(repo)) is kept
+
+
+async def test_a_session_an_agent_is_on_outranks_one_left_open(
+    running_broker: Path, repo: Path
+) -> None:
+    """The collector touches a session it finds a terminal on, so ranking by
+    age alone offered yesterday's abandoned review over today's work."""
+    stale_reply = await launch(repo)
+    live_reply = await launch(repo)
+    wire = await Wire.connect(paths.agent_socket(), key=live_reply["key"])
+    await show(wire, "src/main.c", "today")
+    broker = await running_broker_object()
+    # As a collect pass that found a terminal on the old one leaves things.
+    broker.sessions[stale_reply["id"]].touch()
+
+    assert broker.session_in(str(repo)).sid == wire.hello["session"]
+    await wire.close()
+
+
+async def test_a_hold_does_not_outlive_the_session_it_was_taken_on(
+    runtime: Path, repo: Path
+) -> None:
+    """Ids are handed out again, so a hold left behind by a killed session
+    would keep whatever takes its id next from ever being collected."""
+    broker = Broker()
+    first = await broker.launch_session(str(repo), clean=True)
+    broker.hold(first.sid)
+    await broker.kill(first.sid)
+
+    second = await broker.launch_session(str(repo), clean=True)
+    assert second.sid == first.sid
+    await stale(broker, second.sid)
+    await broker.collect()
+    assert broker.sessions == {}
+
+
+async def test_a_session_the_human_made_is_recorded_as_theirs_at_once(
+    runtime: Path, repo: Path
+) -> None:
+    """Set after the record was written, it was absent from the file a crash
+    would leave behind, and the session came back collectable."""
+    broker = Broker()
+    session = await broker.new_session(str(repo), clean=True)
+    try:
+        saved = next(s for s in store.load() if s["sid"] == session.sid)
+        assert saved["human"] is True
+    finally:
+        await session.close()
+
+
+async def test_a_session_stops_answering_to_the_launches_it_has_outlived(
+    runtime: Path, repo: Path
+) -> None:
+    broker = Broker()
+    session = await broker.launch_session(str(repo), clean=True)
+    await broker.claim(session.key, CLAUDE, True)
+    keys = []
+    for _ in range(session_module.LAUNCHES_REMEMBERED + 3):
+        spare = await broker.launch_session(str(repo), clean=True)
+        keys.append(spare.key)
+        await broker.claim(spare.key, CLAUDE, True)
+    try:
+        assert len(session.also) == session_module.LAUNCHES_REMEMBERED
+        assert broker.session_by_key(keys[-1])[0] is session
+        assert broker.session_by_key(keys[0]) is None
+    finally:
+        for live in list(broker.sessions.values()):
+            await live.close()

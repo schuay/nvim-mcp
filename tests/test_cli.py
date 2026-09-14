@@ -93,6 +93,7 @@ def test_only_a_real_directory_or_an_id_attaches(
     monkeypatch.setattr(cli, "cmd_attach", lambda args: pytest.fail("attached"))
     assert cli._attachable("") is False
     assert cli._attachable("~no-such-user-here") is False
+    assert cli._attachable("x" * 5000) is False
     assert cli._attachable(str(tmp_path / "nothing")) is False
     assert cli._attachable(str(tmp_path)) is True
     with pytest.raises(SystemExit):

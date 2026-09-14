@@ -650,9 +650,9 @@ def _attachable(argument: str) -> bool:
         return True
     try:
         return Path(argument).expanduser().is_dir()
-    except RuntimeError:
-        # `~someone` with no such user, which expanduser raises on rather
-        # than leaving alone.
+    except (OSError, RuntimeError):
+        # A `~someone` with no such user, which expanduser raises on rather
+        # than leaving alone, or a word too long to be a path at all.
         return False
 
 

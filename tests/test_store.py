@@ -41,6 +41,18 @@ def test_a_malformed_file_is_kept_not_overwritten(runtime: Path, text: str) -> N
     assert kept.read_text() == text
 
 
+def test_state_that_cannot_say_where_an_nvim_is_listening_is_set_aside(
+    runtime: Path,
+) -> None:
+    """A v3 session could change the key its socket was named after, so there
+    is nothing to work the path out from."""
+    store.path().write_text(
+        json.dumps({"version": 3, "sessions": [{"sid": "1", "key": "k"}]})
+    )
+    assert store.load() == []
+    assert len(list(store.path().parent.glob("sessions.json.v3-*"))) == 1
+
+
 def test_state_from_before_sessions_belonged_to_conversations_is_set_aside(
     runtime: Path,
 ) -> None:
