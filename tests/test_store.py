@@ -39,3 +39,19 @@ def test_a_malformed_file_is_kept_not_overwritten(runtime: Path, text: str) -> N
     store.save([])
     (kept,) = _aside("malformed")
     assert kept.read_text() == text
+
+
+def test_state_from_before_sessions_belonged_to_conversations_is_set_aside(
+    runtime: Path,
+) -> None:
+    """A v2 file has one session per tree, holding the frames of every
+    conversation that ever worked there. Carrying that over would carry the
+    pile with it."""
+    store.path().write_text(
+        json.dumps({"version": 2, "sessions": [{"sid": "1", "key": "k"}]})
+    )
+    assert store.load() == []
+    assert not store.path().exists()
+    aside = list(store.path().parent.glob("sessions.json.v2-*"))
+    assert len(aside) == 1
+    assert json.loads(aside[0].read_text())["sessions"][0]["sid"] == "1"

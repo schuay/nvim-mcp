@@ -206,6 +206,14 @@ class Session:
     #: When a client last held this session. Only meaningful once none does:
     #: what the collector measures a detached session's age from.
     last_seen: float = field(default_factory=time.time)
+    #: Key pairs from later launches of the same conversation, as
+    #: `[clamped, unclamped]`. The pair in `key` and `host_key` stays the one
+    #: this session goes by; these answer as well.
+    also: list[list[str]] = field(default_factory=list)
+    #: Made by `showme new` for the human rather than prepared for an agent.
+    #: The collector leaves it alone: they made it by hand, it holds whatever
+    #: they have been doing in it, and `showme kill` is how it ends.
+    human: bool = False
     #: What the session shows, bottom frame first, and what the human has
     #: handed back. nvim draws this; it does not own it.
     frames: list[Frame] = field(default_factory=list)
@@ -238,31 +246,49 @@ class Session:
     def authorize(self, key: str) -> Root | None:
         """Return what `key` reaches here, or None if it is not one of ours.
 
-        Both keys are compared without an early exit: the short id alone is
+        Every pair is compared without an early exit: the short id alone is
         guessable, and the secret is what authorizes. Encoded first, because
         `compare_digest` refuses a string with a character outside ASCII, and a
         key arrives as whatever a client put in its JSON.
         """
         offered = key.encode()
-        if secrets.compare_digest(offered, self.key.encode()):
-            return self.root
-        if secrets.compare_digest(offered, self.host_key.encode()):
-            return Anywhere(self.root.path)
+        for clamped, unclamped in self.pairs:
+            if secrets.compare_digest(offered, clamped.encode()):
+                return self.root
+            if secrets.compare_digest(offered, unclamped.encode()):
+                return Anywhere(self.root.path)
         return None
+
+    @property
+    def pairs(self) -> list[tuple[str, str]]:
+        """Every key pair this session answers to, the first one first."""
+        return [(self.key, self.host_key), *(tuple(p) for p in self.also)]  # type: ignore[misc]
 
     def touch(self) -> None:
         self.last_seen = time.time()
 
-    def rekey(self, key: str, host_key: str) -> None:
-        """Answer to the keys of the launch that has just claimed this session.
+    def accept(self, key: str, host_key: str) -> None:
+        """Also answer to the keys of a launch that has just claimed this.
 
         A conversation outlives the launch that started it: resuming one mints
-        a fresh pair, and the session its client means is this one. The socket
-        keeps the name it was created with -- nvim is listening on it, and the
-        name only has to be unique.
+        a pair its client knows and this session does not. The pair it was
+        created with stays the one it goes by -- the socket is named after it,
+        and a client of an earlier launch that is still connected was answered
+        with it and would otherwise stop resolving mid-conversation.
         """
-        self.key = key
-        self.host_key = host_key
+        if (key, host_key) not in self.pairs:
+            self.also.append([key, host_key])
+
+    def revoke(self) -> None:
+        """Answer to nothing any client holds.
+
+        For a prepared session a conversation turned out not to need: its keys
+        now belong to the session that conversation is really on, and two
+        sessions answering to one key would be resolved by dict order.
+        """
+        self.key = f"{self.sid}-{secrets.token_hex(12)}"
+        self.host_key = f"{self.sid}-{secrets.token_hex(12)}"
+        self.also.clear()
 
     @classmethod
     def create(
@@ -275,6 +301,7 @@ class Session:
         env: dict[str, str] | None = None,
         key: str | None = None,
         host_key: str | None = None,
+        socket: Path | None = None,
     ) -> Session:
         # The short id is for humans to type; the secret is what authorizes.
         key = key or f"{sid}-{secrets.token_hex(12)}"
@@ -286,10 +313,14 @@ class Session:
             key=key,
             host_key=host_key or f"{sid}-{secrets.token_hex(12)}",
             root=Root.of(root),
-            # Name the socket after the key, not the reusable id. nvim unlinks
-            # its listen socket when it exits, and a dying predecessor sharing
-            # the path would delete a live successor's socket.
-            socket=nvim_socket(key),
+            # Named after the key it was created with, not the reusable id.
+            # nvim unlinks its listen socket when it exits, and a dying
+            # predecessor sharing the path would delete a live successor's
+            # socket. Which nvim a session owns is then a fact about a running
+            # process rather than a thing to derive again: a restored session
+            # takes the path it was saved with, since the keys it answers to
+            # can have changed since.
+            socket=socket or nvim_socket(key),
         )
 
     def state(self) -> dict[str, Any]:
@@ -301,8 +332,11 @@ class Session:
             "clean": self.clean,
             "background": self.background,
             "env": self.env,
+            "socket": str(self.socket),
             "agent": self.agent,
             "stable": self.stable,
+            "human": self.human,
+            "also": self.also,
             "last_seen": self.last_seen,
             "frames": [frame.state() for frame in self.frames],
             "marks": self.marks,
@@ -321,10 +355,18 @@ class Session:
             # client can be holding the key it never had, and a splice that
             # reconnects after a restart replays the one it was given.
             host_key=state.get("host_key"),
+            # Absent in state written before a session could answer to more
+            # than one pair, when the key it went by could not change.
+            socket=Path(state["socket"]) if state.get("socket") else None,
         )
         session.agent = state.get("agent")
         session.stable = bool(state.get("stable"))
-        session.last_seen = float(state.get("last_seen", time.time()))
+        session.human = bool(state.get("human"))
+        session.also = [list(pair) for pair in state.get("also", [])]
+        # Taken as contact: which clients are connected is not saved, and a
+        # broker that crashed leaves a timestamp as old as the last hello. The
+        # restart is what every session's window is measured from.
+        session.last_seen = time.time()
         session.frames = [Frame.restore(frame) for frame in state.get("frames", [])]
         session.marks = list(state.get("marks", []))
         return session
@@ -619,19 +661,25 @@ class Session:
         if self.on_change is not None:
             self.on_change()
 
-    async def attached(self) -> bool:
+    async def attached(self, timeout: float = 30.0) -> bool:
         """Report whether a UI is on this session's nvim.
 
         A dead nvim has no UI. Asking must not start one: `showme ls` asks
         about every session, and listing them is not a reason to bring them
         back.
+
+        An nvim that is busy rather than gone -- `:!make`, a blocking plugin --
+        answers neither way, and that is `NvimError`, not `NvimGone`. It is
+        left to the caller, because the two callers need opposite things from
+        it: a listing says nothing is attached, and the collector must not take
+        silence for permission to kill.
         """
         async with self._lock:
             if not self.alive:
                 return False
             assert self.rpc is not None
             try:
-                return bool(await self.rpc.request("nvim_list_uis"))
+                return bool(await self.rpc.request("nvim_list_uis", timeout=timeout))
             except NvimGone:
                 return False
 

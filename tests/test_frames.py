@@ -298,3 +298,18 @@ async def test_a_restart_opens_every_frames_files(
     assert loaded == {"main": True, "readme": True}
     assert await bands(again) == ["A1  review"]
     await again.close()
+
+
+async def test_a_session_says_what_it_is_showing(session: Session, repo: Path) -> None:
+    """Several sessions can be rooted in one tree, so `showme ls` has to say
+    more than the root to tell them apart."""
+    assert session.showing == ""
+    await session.show(
+        [
+            Location(repo / "src/main.c", line=1, text="one"),
+            Location(repo / "README.md", line=1, text="two"),
+        ],
+        title="review",
+        focus=False,
+    )
+    assert session.showing == "A  review (2)"

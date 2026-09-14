@@ -306,8 +306,12 @@ def cmd_attach(args: argparse.Namespace) -> NoReturn:
     background = os.environ.get("SHOWME_BACKGROUND") or _detect_background()
     # The broker starts the session's nvim if it has to; a socket path alone
     # would be an error when nothing listens on it.
+    # Resolved here, like every other root this sends: the broker's cwd is
+    # whichever shell first started it, and `showme .` taken against that
+    # names a tree the human is not standing in.
     reply = _ask(
-        {"cmd": "attach", "id": args.id, "background": background}, timeout=30.0
+        {"cmd": "attach", "id": _attach_target(args.id), "background": background},
+        timeout=30.0,
     )
     if not reply["ok"]:
         raise SystemExit(f"showme: {reply['error']}")
@@ -633,8 +637,23 @@ def main(argv: list[str] | None = None) -> int:
     return args.func(args)
 
 
+def _attach_target(argument: str) -> str:
+    if argument.isdigit():
+        return argument
+    return str(Path(argument).expanduser().resolve())
+
+
 def _attachable(argument: str) -> bool:
-    return argument.isdigit() or Path(argument).expanduser().is_dir()
+    if not argument:
+        return False
+    if argument.isdigit():
+        return True
+    try:
+        return Path(argument).expanduser().is_dir()
+    except RuntimeError:
+        # `~someone` with no such user, which expanduser raises on rather
+        # than leaving alone.
+        return False
 
 
 if __name__ == "__main__":

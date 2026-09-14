@@ -11,22 +11,47 @@ session of its own and keeps its notes to itself.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
-from conftest import admin
+from conftest import admin, start_broker, stop_broker
 from mcpwire import Wire
 
 from showme import broker as broker_module
-from showme import paths
+from showme import cli, paths, splice
 from showme.broker import Broker
-from showme.nvimrpc import NvimRPC
+from showme.nvimrpc import NvimError, NvimRPC
+from showme.session import Session
 
 pytestmark = pytest.mark.nvim
 
 CLAUDE = "CLAUDE_CODE_SESSION_ID:a2b1"
+
+
+async def running_broker_object() -> Broker:
+    """The Broker the `running_broker` fixture started, for tests that have to
+    reach past the socket to drive the collector."""
+    tasks = [
+        task
+        for task in asyncio.all_tasks()
+        if task.get_coro().__qualname__ == "serve"  # type: ignore[union-attr]
+    ]
+    assert len(tasks) == 1, tasks
+    frame = tasks[0].get_coro().cr_frame  # type: ignore[union-attr]
+    return frame.f_locals["broker"]
+
+
+async def until(condition: Callable[[], bool], timeout: float = 5.0) -> None:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        if condition():
+            return
+        await asyncio.sleep(0.01)
+    raise AssertionError("condition never held")
 
 
 async def launch(repo: Path) -> dict:
@@ -180,7 +205,7 @@ async def test_a_session_a_client_holds_is_never_collected(
 ) -> None:
     broker = Broker()
     session = await broker.launch_session(str(repo), clean=True)
-    broker.held.add(session.sid)
+    broker.hold(session.sid)
     await stale(broker, session.sid)
     await broker.collect()
     assert list(broker.sessions) == [session.sid]
@@ -193,7 +218,8 @@ async def test_a_session_with_a_terminal_on_it_is_kept(
     """The review usually outlives the agent, and the human reading it is the
     one thing that says so."""
     broker = Broker()
-    session = await broker.new_session(str(repo), clean=True)
+    session = await broker.launch_session(str(repo), clean=True)
+    await session.ensure()
     ui = await NvimRPC.connect(session.socket)
     await ui.request("nvim_ui_attach", 80, 24, {})
     try:
@@ -219,9 +245,330 @@ async def test_a_tree_attaches_to_the_session_last_used_in_it(
     older.last_seen = time.time() - 60
 
     assert broker.session_in(str(repo)) is newer
-    # And a directory above the root finds it too, which is how a human
-    # standing in a parent reaches the session in a worktree below.
-    assert broker.session_in(str(repo.parent)) is newer
-    assert broker.session_in(str(repo / "src")) is None
+    # From inside the tree too: this is `showme .` typed anywhere under it.
+    assert broker.session_in(str(repo / "src")) is newer
     newer.last_seen = time.time() - 120
     assert broker.session_in(str(repo)) is older
+
+
+async def test_a_tree_above_a_session_is_not_the_tree_it_is_in(
+    runtime: Path, repo: Path
+) -> None:
+    """`showme /` and `showme ~` used to answer with whatever ran last
+    anywhere on the machine."""
+    broker = Broker()
+    await broker.launch_session(str(repo), clean=True)
+    assert broker.session_in("/") is None
+    assert broker.session_in(str(repo.parent)) is None
+
+
+async def test_the_nearest_root_wins(runtime: Path, repo: Path) -> None:
+    """A worktree inside a checkout has its own session, and standing in it
+    means that one rather than the one on the tree around it."""
+    broker = Broker()
+    outer = await broker.launch_session(str(repo), clean=True)
+    inner = await broker.launch_session(str(repo / "src"), clean=True)
+    outer.touch()  # and the outer one is the more recently used of the two
+
+    assert broker.session_in(str(repo / "src")) is inner
+    assert broker.session_in(str(repo)) is outer
+
+
+async def test_a_relative_directory_never_reaches_the_broker(
+    runtime: Path, repo: Path
+) -> None:
+    """The broker's cwd is whichever shell first started it, so a path taken
+    against it would name a tree the human is not standing in."""
+    broker = Broker()
+    await broker.launch_session(str(repo), clean=True)
+    assert broker.session_in(".") is None
+    assert cli._attach_target(str(repo / "src" / "..")) == str(repo)
+
+
+async def test_a_conversation_keeps_its_session_when_a_second_client_connects(
+    running_broker: Path, repo: Path
+) -> None:
+    """A harness that restarts its MCP server can leave two clients of one
+    conversation connected at once. Taking the keys away from the first left
+    it answering "no such session" for the rest of its life."""
+    first = await launch(repo)
+    one = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent=CLAUDE, stable=True
+    )
+    await show(one, "src/main.c", "from the first client")
+
+    second = await launch(repo)
+    two = await Wire.connect(
+        paths.agent_socket(), key=second["key"], agent=CLAUDE, stable=True
+    )
+    assert two.hello["session"] == one.hello["session"]
+
+    still = await show(one, "README.md", "the first client is still here")
+    assert still["session"] == one.hello["session"]
+    await one.close()
+    await two.close()
+
+
+async def test_a_key_another_conversation_is_on_is_refused(
+    running_broker: Path, repo: Path
+) -> None:
+    """One key handed to two conversations used to merge them into one frame
+    stack, which is what a session being one conversation's is for."""
+    first = await launch(repo)
+    one = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent="one:1", stable=True
+    )
+    await show(one, "src/main.c", "mine")
+
+    two = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent="two:2", stable=True
+    )
+    assert two.hello == {"ok": False, "error": "no such session"}
+    await one.close()
+    await two.close()
+
+
+async def test_a_resumed_conversation_in_another_tree_gets_its_own_session(
+    runtime: Path, repo: Path, tmp_path: Path
+) -> None:
+    """The root is what a key is clamped to and where nvim runs. Handing a
+    conversation resumed elsewhere the session it had silently kept the reach
+    of the tree it started in."""
+    elsewhere = tmp_path / "other"
+    elsewhere.mkdir()
+    broker = Broker()
+    first = await broker.launch_session(str(repo), clean=True)
+    claimed = await broker.claim(first.key, CLAUDE, True)
+    assert claimed is not None
+
+    second = await broker.launch_session(str(elsewhere), clean=True)
+    resumed = await broker.claim(second.key, CLAUDE, True)
+    assert resumed is not None
+    assert resumed.session is not first
+    assert resumed.root.path == elsewhere
+    for session in list(broker.sessions.values()):
+        await session.close()
+
+
+async def test_a_resume_does_not_stop_an_editor_the_human_is_in(
+    runtime: Path, repo: Path
+) -> None:
+    """Over ssh the human is told to attach before asking for anything, which
+    lands them on the session the launch prepared. The hello then dropped it,
+    and `close` takes their terminal with it."""
+    broker = Broker()
+    mine = await broker.launch_session(str(repo), clean=True)
+    mine.agent, mine.stable = CLAUDE, True
+    spare = await broker.launch_session(str(repo), clean=True)
+    await broker.attach(str(repo))
+    ui = await NvimRPC.connect(spare.socket)
+    await ui.request("nvim_ui_attach", 80, 24, {})
+    try:
+        assert await spare.attached() is True
+        claimed = await broker.claim(spare.key, CLAUDE, True)
+        assert claimed is not None and claimed.session is mine
+        assert spare.alive, "the human's editor was stopped"
+        # And nothing resolves to it any more, so the key the client presented
+        # cannot name two sessions at once.
+        assert broker.session_by_key(claimed.key)[0] is mine
+    finally:
+        await ui.close()
+        for session in list(broker.sessions.values()):
+            await session.close()
+
+
+async def test_a_busy_nvim_is_left_alone_rather_than_collected(
+    runtime: Path, repo: Path
+) -> None:
+    """An nvim that does not answer is busy, not gone. Taking silence for
+    permission killed a session someone was in -- and the error escaped the
+    broker's own loop, which took the broker with it."""
+    broker = Broker()
+    session = await broker.launch_session(str(repo), clean=True)
+    await session.ensure()
+    await stale(broker, session.sid)
+
+    async def wedged(timeout: float = 30.0) -> bool:
+        raise NvimError("nvim did not answer nvim_list_uis within 5.0s")
+
+    session.attached = wedged  # type: ignore[method-assign]
+    await broker.collect()
+    assert list(broker.sessions) == [session.sid]
+    del session.attached  # type: ignore[attr-defined]
+    await broker.kill(session.sid)
+
+
+async def test_a_session_the_human_made_is_not_collected(
+    runtime: Path, repo: Path
+) -> None:
+    """`showme new` is the human's own editor, holding whatever they have been
+    doing in it. Stopping it sends `qall!`, and unwritten buffers go with it."""
+    broker = Broker()
+    session = await broker.new_session(str(repo), clean=True)
+    await stale(broker, session.sid)
+    await broker.collect()
+    assert list(broker.sessions) == [session.sid]
+    await broker.kill(session.sid)
+
+
+async def test_a_client_that_does_not_name_itself_keeps_its_own_session(
+    running_broker: Path, repo: Path
+) -> None:
+    """An older published splice sends a hello with no agent at all."""
+    first = await launch(repo)
+    one = await Wire.connect(paths.agent_socket(), key=first["key"], agent="")
+    assert one.hello == {"ok": True, "session": "1"}
+    await show(one, "src/main.c", "from a client that says nothing")
+
+    second = await launch(repo)
+    two = await Wire.connect(paths.agent_socket(), key=second["key"], agent="")
+    assert two.hello["session"] != "1", "it took over the first one's session"
+    assert await notes_of(two) == []
+    await one.close()
+    await two.close()
+
+
+async def test_a_connected_client_holds_its_session_against_the_collector(
+    running_broker: Path, repo: Path
+) -> None:
+    """`held` is the only thing protecting a conversation that has been quiet
+    for longer than its window, and nothing filled it in a test before."""
+    reply = await launch(repo)
+    wire = await Wire.connect(paths.agent_socket(), key=reply["key"])
+    await show(wire, "src/main.c", "still working")
+
+    broker = await running_broker_object()
+    session = broker.sessions[wire.hello["session"]]
+    session.last_seen = time.time() - broker_module.RESUMABLE_SECONDS - 1
+    await broker.collect()
+    assert wire.hello["session"] in broker.sessions
+
+    # And once it goes, the same session is collectable.
+    await wire.close()
+    await until(lambda: not broker.held)
+    session.last_seen = time.time() - broker_module.RESUMABLE_SECONDS - 1
+    await broker.collect()
+    assert wire.hello["session"] not in broker.sessions
+
+
+async def test_a_tool_call_counts_as_contact(running_broker: Path, repo: Path) -> None:
+    """A conversation can hold one connection open for hours. Only the hello
+    and the disconnect used to move the clock, so a long quiet one aged out
+    from under its client."""
+    reply = await launch(repo)
+    wire = await Wire.connect(paths.agent_socket(), key=reply["key"])
+    broker = await running_broker_object()
+    session = broker.sessions[wire.hello["session"]]
+    session.last_seen = time.time() - 10_000
+    await show(wire, "src/main.c", "a call an hour later")
+    assert time.time() - session.last_seen < 5
+    await wire.close()
+
+
+async def test_the_broker_collects_on_its_own(
+    runtime: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Nothing calls the collector but the broker's own loop, and no test
+    drove that loop."""
+    monkeypatch.setattr(broker_module, "TICK_SECONDS", 0.05)
+    stop, task = await start_broker()
+    try:
+        reply = await admin({"cmd": "ensure", "root": str(repo), "clean": True})
+        broker = await running_broker_object()
+        session = broker.sessions[reply["id"]]
+        session.last_seen = time.time() - broker_module.RESUMABLE_SECONDS - 1
+        await until(lambda: reply["id"] not in broker.sessions)
+    finally:
+        await stop_broker(stop, task)
+
+
+async def test_a_session_whose_keys_changed_keeps_its_nvim_across_a_restart(
+    runtime: Path, repo: Path
+) -> None:
+    """The socket is named after the key a session was made with, and a
+    session can stop answering to that key -- a prepared one the human is
+    attached to has its keys taken away when the conversation lands
+    elsewhere. Deriving the socket again from the current key hands the next
+    broker a path nobody is listening on: it adopts nothing, the record is
+    marked dead, and the human's editor is left running with no owner."""
+    broker = Broker()
+    session = await broker.launch_session(str(repo), clean=True)
+    await session.ensure()
+    listening = session.socket
+    session.revoke()
+
+    restored = Session.restore(session.state())
+    assert restored.socket == listening
+    try:
+        await restored.ensure(spawn=False)
+        assert restored.alive, "the running nvim was not adopted"
+    finally:
+        await restored.detach()
+        await session.close()
+
+
+async def test_one_client_leaving_does_not_unhold_a_session_another_is_on(
+    running_broker: Path, repo: Path
+) -> None:
+    """Two connections of one conversation overlap when a harness restarts
+    its MCP server. A set could only remember that someone was holding it."""
+    first = await launch(repo)
+    one = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent=CLAUDE, stable=True
+    )
+    second = await launch(repo)
+    two = await Wire.connect(
+        paths.agent_socket(), key=second["key"], agent=CLAUDE, stable=True
+    )
+    sid = one.hello["session"]
+    assert two.hello["session"] == sid
+
+    broker = await running_broker_object()
+    await one.close()
+    await until(lambda: broker.held.get(sid, 0) == 1)
+
+    broker.sessions[sid].last_seen = time.time() - broker_module.RESUMABLE_SECONDS - 1
+    await broker.collect()
+    assert sid in broker.sessions, "collected while a client was still on it"
+    await two.close()
+
+
+async def test_a_hello_that_is_not_an_object_is_refused_and_let_go_of(
+    running_broker: Path, repo: Path
+) -> None:
+    """Whatever a client puts under the field, from the one socket a sandbox
+    can reach. It used to raise past the handler, leaving the connection in
+    the broker's list forever -- and a broker with a client it thinks is
+    connected never idles out."""
+    broker = await running_broker_object()
+    for body in ("nonsense", None, [], 7):
+        reader, writer = await asyncio.open_unix_connection(str(paths.agent_socket()))
+        writer.write(json.dumps({splice.HELLO: body}).encode() + b"\n")
+        await writer.drain()
+        line = await asyncio.wait_for(reader.readline(), 10)
+        assert json.loads(line)[splice.HELLO] == {
+            "ok": False,
+            "error": "no such session",
+        }
+        writer.close()
+    await until(lambda: broker.clients == 0)
+
+
+async def test_a_listing_does_not_wait_on_an_nvim_that_is_busy(
+    running_broker: Path, repo: Path
+) -> None:
+    """`showme ls` asks every session whether a terminal is on it. One that
+    cannot answer must not fail the listing or hold it up."""
+    reply = await admin({"cmd": "ensure", "root": str(repo), "clean": True})
+    broker = await running_broker_object()
+    session = broker.sessions[reply["id"]]
+
+    async def wedged(timeout: float = 30.0) -> bool:
+        raise NvimError("nvim did not answer nvim_list_uis within 5.0s")
+
+    session.attached = wedged  # type: ignore[method-assign]
+    listing = await admin({"cmd": "ls"})
+    assert listing["ok"], listing
+    assert [s["id"] for s in listing["sessions"]] == [reply["id"]]
+    assert listing["sessions"][0]["attached"] is False
+    del session.attached  # type: ignore[attr-defined]

@@ -82,3 +82,40 @@ def test_a_command_name_wins_over_a_directory_of_the_same_name(
     monkeypatch.setattr(cli, "cmd_attach", lambda args: pytest.fail("attached"))
     monkeypatch.setattr(cli, "cmd_ls", lambda args: 0)
     assert cli.main(["ls"]) == 0
+
+
+def test_only_a_real_directory_or_an_id_attaches(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`Path("")` is the current directory and `Path("~nobody").expanduser()`
+    raises, so both used to reach `cmd_attach` -- one silently, one as a
+    traceback."""
+    monkeypatch.setattr(cli, "cmd_attach", lambda args: pytest.fail("attached"))
+    assert cli._attachable("") is False
+    assert cli._attachable("~no-such-user-here") is False
+    assert cli._attachable(str(tmp_path / "nothing")) is False
+    assert cli._attachable(str(tmp_path)) is True
+    with pytest.raises(SystemExit):
+        cli.main([""])
+
+
+def test_a_directory_is_resolved_before_it_leaves_the_client(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The broker's cwd is whichever shell first started it; `showme .` taken
+    against that names a tree the human is not standing in."""
+    here = tmp_path / "here"
+    here.mkdir()
+    monkeypatch.chdir(here)
+    monkeypatch.setattr(cli, "_ensure_broker", lambda: None)
+    monkeypatch.setattr(cli, "_detect_background", lambda: None)
+    sent: list[dict] = []
+
+    def ask(request: dict, timeout: float = 0) -> dict:
+        sent.append(request)
+        raise SystemExit(0)
+
+    monkeypatch.setattr(cli, "_ask", ask)
+    with pytest.raises(SystemExit):
+        cli.main(["."])
+    assert sent[0]["id"] == str(here.resolve())

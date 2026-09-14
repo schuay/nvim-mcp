@@ -344,3 +344,55 @@ def test_a_sandboxed_client_asks_for_no_broker_and_no_session(
     assert started == []
     assert captured["revive"] is None
     assert captured["key"] is None
+
+
+def test_a_harness_that_names_its_session_is_taken_at_its_word(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "2ea15ac0-3690")
+    agent, stable = splice.identify()
+    # Qualified by the variable it came from: two harnesses numbering their
+    # sessions from one would otherwise name each other's conversations.
+    assert agent == "CLAUDE_CODE_SESSION_ID:2ea15ac0-3690"
+    assert stable is True
+
+
+def test_a_client_with_no_harness_id_names_itself(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in splice.SESSION_VARS:
+        monkeypatch.delenv(name, raising=False)
+    first, stable = splice.identify()
+    second, _ = splice.identify()
+    # Its own name, and a different one every time: two launches a harness
+    # does not tell us apart are two conversations, not one.
+    assert first != second
+    assert stable is False
+    assert first.startswith("launch:")
+
+
+def test_the_hello_names_the_conversation(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The broker keys a session on what this line carries."""
+    monkeypatch.setenv("CLAUDE_CODE_SESSION_ID", "abc123")
+    sock = tmp_path / "fake.sock"
+    sent: list[bytes] = []
+
+    class Recorder:
+        def sendall(self, data: bytes) -> None:
+            sent.append(data)
+
+        def settimeout(self, _seconds: float) -> None:
+            pass
+
+        def recv(self, _size: int) -> bytes:
+            return json.dumps({splice.HELLO: {"ok": True}}).encode() + b"\n"
+
+    client = splice.Splice(str(sock), key="k-1")
+    assert client._hello(Recorder()) is True
+    assert json.loads(sent[0])[splice.HELLO] == {
+        "key": "k-1",
+        "agent": "CLAUDE_CODE_SESSION_ID:abc123",
+        "stable": True,
+    }

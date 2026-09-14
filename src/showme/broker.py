@@ -39,6 +39,7 @@ from typing import Any
 
 from . import mcpserver, paths, splice, store
 from .clamp import Refused, Root
+from .nvimrpc import NvimError
 from .session import Session
 
 log = logging.getLogger(__name__)
@@ -46,12 +47,20 @@ log = logging.getLogger(__name__)
 #: Exit once nothing has needed the broker for this long.
 IDLE_EXIT_SECONDS = 15 * 60
 
+#: How often the loop looks at the sessions: how long a shutdown waits, and
+#: how soon the collector sees a session go quiet.
+TICK_SECONDS = 5.0
+
 #: How long a detached session is kept before the collector takes it. A named
 #: conversation may be resumed, and is given a day to come back; one that made
 #: its own name cannot be resumed at all, so it is kept only long enough for
 #: the human to finish reading a review the agent left behind.
 RESUMABLE_SECONDS = 24 * 60 * 60
 LAUNCH_SECONDS = 30 * 60
+
+#: How long the collector waits for an nvim to say whether a UI is on it.
+#: Short because this runs on the broker's loop, which serves every client.
+PROBE_SECONDS = 5.0
 
 #: How long a line a client may send. One tool call is one line, and the
 #: contract accepts 50 locations carrying 2000 characters of note each, which
@@ -81,9 +90,12 @@ class Broker:
         #: Live client connections. Closing a listener waits for these, so
         #: shutdown has to end them itself or a connected client pins the broker.
         self.connections: set[asyncio.Task[None]] = set()
-        #: Sessions a client is holding right now, by sid. The collector
-        #: leaves these alone however old their last contact is.
-        self.held: set[str] = set()
+        #: How many clients hold each session right now, by sid. The collector
+        #: leaves a held session alone however old its last contact is. A
+        #: count rather than a set: one conversation can have two connections
+        #: -- a restarted MCP server overlapping its predecessor -- and the
+        #: first to close must not unhold the session for the other.
+        self.held: dict[str, int] = {}
         #: Held while the registry changes. Creating a session awaits nvim
         #: startup, and two creations that pick an id before either has
         #: registered would pick the same one.
@@ -96,6 +108,27 @@ class Broker:
     @property
     def clients(self) -> int:
         return len(self.connections)
+
+    def hold(self, sid: str) -> None:
+        self.held[sid] = self.held.get(sid, 0) + 1
+
+    def release(self, sid: str) -> None:
+        if self.held.get(sid, 0) <= 1:
+            self.held.pop(sid, None)
+        else:
+            self.held[sid] -= 1
+
+    def in_use(self, key: str) -> tuple[Session, Root] | None:
+        """Resolve a key for a tool call, counting it as contact.
+
+        What the collector measures is when a session was last of use to
+        anyone. A connection that is held open for hours and calls throughout
+        is exactly that, and nothing else on the call path would say so.
+        """
+        found = self.session_by_key(key)
+        if found is not None:
+            found[0].touch()
+        return found
 
     def save(self) -> None:
         store.save([session.state() for session in self.sessions.values()])
@@ -138,8 +171,16 @@ class Broker:
         background: str | None = None,
         env: dict[str, str] | None = None,
     ) -> Session:
+        """Make a session for the human, who asked for it by hand.
+
+        Not the collector's business however long it sits: they made it, it
+        holds whatever they have been doing in it -- unwritten buffers
+        included -- and `showme kill` is what ends one.
+        """
         async with self._lock:
-            return await self._create(root, clean, background, env)
+            session = await self._create(root, clean, background, env)
+            session.human = True
+            return session
 
     async def launch_session(
         self,
@@ -186,34 +227,61 @@ class Broker:
             found = self.session_by_key(key)
             if found is None:
                 return None
-            session, root = found
+            prepared, root = found
             if not agent:
                 # A client that does not name itself gets what its key names
                 # and nothing more: with no conversation to speak of, there is
                 # nothing to hand back to it later.
-                return Claim(key, session, root)
-            held = self._session_of(agent, besides=session)
-            if held is not None:
-                held.rekey(session.key, session.host_key)
-                root = held.authorize(key) or root
-                await self._drop(session)
-                session = held
+                return Claim(key, prepared, root)
+            if prepared.agent not in (None, agent):
+                # Another conversation is on it. Handing it over would put two
+                # conversations in one frame stack, which is the thing a
+                # session being one conversation's is for.
+                return None
+            session = prepared
+            mine = self._session_of(agent, besides=prepared)
+            if mine is not None:
+                for pair in prepared.pairs:
+                    mine.accept(*pair)
+                root = mine.authorize(key) or root
+                await self._release(prepared)
+                session = mine
             session.agent, session.stable = agent, stable
             session.touch()
             self.save()
             return Claim(key, session, root)
 
     def _session_of(self, agent: str, besides: Session) -> Session | None:
+        """The session this conversation already has in this tree.
+
+        Rooted the same, because the root is what a key is clamped to and
+        where nvim runs: a conversation resumed somewhere else is starting
+        work on another tree and gets a session there, rather than quietly
+        keeping the reach its first launch had.
+        """
         return next(
             (
                 session
                 for session in self.sessions.values()
-                if session.agent == agent and session is not besides
+                if session.agent == agent
+                and session is not besides
+                and session.root.path == besides.root.path
             ),
             None,
         )
 
-    async def _drop(self, session: Session) -> None:
+    async def _release(self, session: Session) -> None:
+        """Let go of a session the conversation that asked for it did not need.
+
+        Usually it was never shown anything and goes now. But a human can
+        attach to a prepared session by its root before the agent connects --
+        over ssh that is what they are told to do -- and stopping its nvim
+        would take their terminal with it. That one keeps its editor and loses
+        its keys, so nothing resolves to it, and waits for the collector.
+        """
+        if session.frames or session.alive:
+            session.revoke()
+            return
         self.sessions.pop(session.sid, None)
         await session.close()
 
@@ -252,23 +320,35 @@ class Broker:
             return True
 
     def session_in(self, directory: str) -> Session | None:
-        """The session to attach to for a tree, newest use first.
+        """The session to attach to for a tree, most recently used first.
 
         A launcher prints the root rather than an id, because the id it made
         is not always the one the agent ends up on. A tree with several
         conversations working in it answers with the one most recently used,
         and `showme ls` is how to reach any of the others.
+
+        The tree a human is standing in is the one they mean, so a session
+        rooted above them counts and one rooted below does not: `showme .`
+        deep inside a worktree finds the session working on it, while
+        `showme /` finds nothing rather than whatever ran last on the machine.
+        The nearest root wins, so a session on a worktree is not shadowed by
+        one on the checkout it sits in.
         """
-        try:
-            wanted = Path(directory).expanduser().resolve()
-        except OSError:
+        wanted = Path(directory)
+        if not wanted.is_absolute():
+            # The client resolves it; anything relative that reaches here was
+            # taken against some other shell's directory already.
             return None
         rooted = [
             session
             for session in self.sessions.values()
-            if session.root.path == wanted or wanted in session.root.path.parents
+            if session.root.path == wanted or session.root.path in wanted.parents
         ]
-        return max(rooted, key=lambda s: s.last_seen, default=None)
+        return max(
+            rooted,
+            key=lambda s: (len(s.root.path.parts), s.last_seen),
+            default=None,
+        )
 
     async def attach(self, sid: str, background: str | None = None) -> Session | None:
         """Have a session's nvim running so a terminal can attach to it.
@@ -278,6 +358,10 @@ class Broker:
         """
         session = self.sessions.get(sid) or self.session_in(sid)
         if session is not None:
+            # Before anything else: a terminal takes a moment to start and
+            # attach its UI, and the collector must not take the session in
+            # between for want of one.
+            session.touch()
             await session.ensure()
             if background is not None:
                 await session.wear_background(background)
@@ -292,20 +376,50 @@ class Broker:
         review may have outlived the agent on purpose and the human may still
         be reading it -- so a session with a UI on it is in use whatever its
         client did, and one with none is taken once its window has passed.
+
+        Asking nvim about its UIs is a round trip, and a hello can land inside
+        it, so what the decision was made from is read again under the lock
+        before anything is stopped. This runs on the broker's own loop: an
+        nvim that is merely busy must cost it a short wait and nothing else.
         """
-        for session in list(self.sessions.values()):
-            if session.sid in self.held:
+        for session in await self._stale():
+            try:
+                busy = await session.attached(timeout=PROBE_SECONDS)
+            except NvimError:
+                # Busy is not gone, and silence is not permission to kill.
+                # Counted as contact so a wedged nvim is not probed again on
+                # every tick, each time for as long as the probe allows.
+                session.touch()
                 continue
-            window = RESUMABLE_SECONDS if session.stable else LAUNCH_SECONDS
-            if time.time() - session.last_seen < window:
-                continue
-            if await session.attached():
+            if busy:
                 # Being read counts as being used, and the human closing that
                 # terminal is what starts the clock again.
                 session.touch()
                 continue
+            async with self._lock:
+                if self.sessions.get(session.sid) is not session:
+                    continue
+                if not self._is_stale(session):
+                    continue
+                self.sessions.pop(session.sid, None)
             log.info("session %s: collected, nothing was using it", session.sid)
-            await self.kill(session.sid)
+            await session.close()
+            self.save()
+
+    async def _stale(self) -> list[Session]:
+        async with self._lock:
+            return [s for s in self.sessions.values() if self._is_stale(s)]
+
+    def _is_stale(self, session: Session) -> bool:
+        if session.human or self.held.get(session.sid):
+            return False
+        age = time.time() - session.last_seen
+        if age < 0:
+            # The clock moved backwards. Taking it as contact costs a session
+            # one window; the alternative is never collecting it again.
+            session.touch()
+            return False
+        return age >= (RESUMABLE_SECONDS if session.stable else LAUNCH_SECONDS)
 
     async def close(self) -> None:
         """Let go of every session's nvim without stopping it.
@@ -399,18 +513,31 @@ async def _stop(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
 
 async def _ls(broker: Broker, _request: dict[str, Any]) -> dict[str, Any]:
     listing = []
-    for session in broker.sessions.values():
+    # A snapshot: the collector can take a session while this awaits nvim.
+    for session in list(broker.sessions.values()):
         listing.append(
             {
                 "id": session.sid,
                 "key": session.key,
                 "root": str(session.root.path),
                 "socket": str(session.socket),
-                "attached": await session.attached(),
+                "attached": await _attached(session),
                 "showing": session.showing,
             }
         )
     return {"sessions": listing}
+
+
+async def _attached(session: Session) -> bool:
+    """Whether a terminal is on this session, for a listing.
+
+    An nvim too busy to answer is reported as having none: a listing waits for
+    nobody, and the collector is the caller that has to tell the two apart.
+    """
+    try:
+        return await session.attached(timeout=PROBE_SECONDS)
+    except NvimError:
+        return False
 
 
 async def _attach(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
@@ -474,6 +601,10 @@ async def _hello(
     if not isinstance(opening, dict) or splice.HELLO not in opening:
         return _Pushback(reader, line), None
     body = opening[splice.HELLO]
+    if not isinstance(body, dict):
+        # Whatever a client puts under the field, from the one socket a
+        # sandbox can reach. It gets the same answer as a key nobody issued.
+        body = {}
     key = str(body.get("key") or "")
     claimed = await broker.claim(
         key, str(body.get("agent") or ""), bool(body.get("stable"))
@@ -502,18 +633,23 @@ async def _agent_client(
     task = asyncio.current_task()
     if task is not None:
         broker.connections.add(task)
+    session = None
+    # One finally for the whole connection: a client this never finished
+    # serving used to stay in `connections`, and a broker with a client it
+    # thinks is connected never idles out.
     try:
-        stream, claimed = await _hello(broker, reader, writer)
-    except (OSError, asyncio.IncompleteReadError):
-        broker.connections.discard(task)
-        writer.close()
-        return
-    session = claimed.session if claimed is not None else None
-    key = claimed.key if claimed is not None else None
-    server = mcpserver.build(broker.session_by_key, broker.save, default_key=key)
-    if session is not None:
-        broker.held.add(session.sid)
-    try:
+        try:
+            stream, claimed = await _hello(broker, reader, writer)
+        except (OSError, asyncio.IncompleteReadError):
+            return
+        session = claimed.session if claimed is not None else None
+        if session is not None:
+            broker.hold(session.sid)
+        server = mcpserver.build(
+            broker.in_use,
+            broker.save,
+            default_key=claimed.key if claimed is not None else None,
+        )
         await mcpserver.serve(stream, writer, server)
     except asyncio.CancelledError:
         raise
@@ -523,7 +659,7 @@ async def _agent_client(
         if session is not None:
             # The conversation may be back -- resumed, or its server restarted
             # -- so the session stays, and this is when it starts ageing.
-            broker.held.discard(session.sid)
+            broker.release(session.sid)
             session.touch()
             broker.save()
         broker.connections.discard(task)
@@ -596,14 +732,14 @@ async def _until_idle(broker: Broker) -> None:
     idle_for = 0.0
     while True:
         with contextlib.suppress(TimeoutError):
-            await asyncio.wait_for(broker.stop.wait(), 5)
+            await asyncio.wait_for(broker.stop.wait(), TICK_SECONDS)
         if broker.stop.is_set():
             return
         await broker.collect()
         if broker.sessions or broker.clients:
             idle_for = 0.0
             continue
-        idle_for += 5
+        idle_for += TICK_SECONDS
         if idle_for >= IDLE_EXIT_SECONDS:
             return
 

@@ -46,9 +46,9 @@ class Wire:
         if key is not None:
             # A client names the conversation it serves, and two that do not
             # say are two conversations, as two real clients would be.
-            wire.hello = await wire.present(
-                key, agent or f"test:{uuid.uuid4().hex}", stable
-            )
+            # An explicit "" is an older client that names no conversation.
+            named = f"test:{uuid.uuid4().hex}" if agent is None else agent
+            wire.hello = await wire.present(key, named, stable)
         wire.initialized = await wire.request(
             "initialize",
             {
