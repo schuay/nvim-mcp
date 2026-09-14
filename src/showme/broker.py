@@ -83,6 +83,11 @@ class Broker:
         #: Connection counts prevent collection while any client holds a session.
         #: MCP process restarts can leave overlapping connections.
         self.held: dict[str, int] = {}
+        #: What each live connection presented. Keyed on the connection rather
+        #: than the session id because ids are handed out again: a client of
+        #: the session that had an id must not keep a key alive in the session
+        #: that has it now.
+        self.presented: dict[asyncio.Task[None], Claim] = {}
         #: Held while the registry changes. Creating a session awaits nvim
         #: startup, and two creations that pick an id before either has
         #: registered would pick the same one.
@@ -110,6 +115,15 @@ class Broker:
             self.held.pop(session.sid, None)
         else:
             self.held[session.sid] -= 1
+
+    def live_keys(self, session: Session) -> set[str]:
+        """The keys connections to this session are still answering with.
+
+        By identity, like `release`, and for the same reason.
+        """
+        return {
+            claim.key for claim in self.presented.values() if claim.session is session
+        }
 
     def in_use(self, key: str) -> tuple[Session, Root] | None:
         """Resolve a tool-call key and refresh the session expiry time."""
@@ -199,8 +213,9 @@ class Broker:
                 # session keys and keys from earlier connections.
                 mine = self._session_of(agent, besides=prepared)
                 if mine is not None:
+                    keep = self.live_keys(mine)
                     for pair in prepared.pairs:
-                        mine.accept(*pair)
+                        mine.accept(*pair, keep=keep)
                     root = mine.authorize(key) or root
                     self._release(prepared)
                     session = mine
@@ -236,6 +251,10 @@ class Broker:
         """
         session.revoke()
         session.released = True
+        # The grace is for a terminal on its way in, so it starts here. A spare
+        # prepared minutes ago is already older than the window, and would go
+        # on the collector's next pass with nothing having had time to draw.
+        session.touch()
 
     async def _create(
         self,
@@ -585,8 +604,10 @@ async def _agent_client(
         except (OSError, asyncio.IncompleteReadError):
             return
         session = claimed.session if claimed is not None else None
-        if session is not None:
-            broker.hold(session)
+        if claimed is not None:
+            broker.hold(claimed.session)
+            if task is not None:
+                broker.presented[task] = claimed
         server = mcpserver.build(
             broker.in_use,
             broker.save,
@@ -604,6 +625,8 @@ async def _agent_client(
             broker.release(session)
             session.touch()
             broker.save()
+        if task is not None:
+            broker.presented.pop(task, None)
         broker.connections.discard(task)
         writer.close()
 

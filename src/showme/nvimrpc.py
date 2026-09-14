@@ -90,8 +90,12 @@ class NvimRPC:
         try:
             return await asyncio.wait_for(future, timeout)
         except TimeoutError:
-            self._pending.pop(msgid, None)
             raise NvimError(f"nvim did not answer {method} within {timeout}s") from None
+        finally:
+            # Also on cancellation: a caller under an outer deadline is dropped
+            # here without ever timing out, and its entry would sit in the map
+            # until the connection ends.
+            self._pending.pop(msgid, None)
 
     async def notify(self, method: str, *params: Any) -> None:
         """Send a call that expects no answer.

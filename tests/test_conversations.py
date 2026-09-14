@@ -796,3 +796,104 @@ async def test_a_session_claimed_again_is_no_longer_on_its_way_out(
     assert spare.sid in broker.sessions
     for session in list(broker.sessions.values()):
         await session.close()
+
+
+async def test_a_connected_client_keeps_its_key_across_later_launches(
+    running_broker: Path, repo: Path
+) -> None:
+    """A resumed launch's pair goes on the accepted list, which is capped. The
+    oldest entry was dropped to make room whether or not a client was still
+    answering with it, and that client's calls stopped resolving."""
+    first = await launch(repo)
+    one = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent=CLAUDE, stable=True
+    )
+    await show(one, "src/main.c", "from the first run")
+    await one.close()
+
+    # The oldest accepted pair, and its client never goes away: a harness that
+    # restarted its MCP server while the first one was still connected.
+    second = await launch(repo)
+    two = await Wire.connect(
+        paths.agent_socket(), key=second["key"], agent=CLAUDE, stable=True
+    )
+    assert two.hello["session"] == one.hello["session"]
+
+    for _ in range(session_module.LAUNCHES_REMEMBERED + 1):
+        later = await launch(repo)
+        wire = await Wire.connect(
+            paths.agent_socket(), key=later["key"], agent=CLAUDE, stable=True
+        )
+        await wire.close()
+
+    result = await two.call(
+        "show",
+        {"session": second["key"], "locations": [{"file": "README.md", "text": "b"}]},
+    )
+    assert not result.get("isError"), result
+    await two.close()
+
+
+async def test_a_released_session_gets_its_grace_from_the_release(
+    running_broker: Path, repo: Path
+) -> None:
+    """The minute is for a terminal on its way in. Measured from whenever the
+    spare was prepared, a launcher that ran a while before its agent connected
+    left one already past the window, and the next pass took it."""
+    first = await launch(repo)
+    one = await Wire.connect(
+        paths.agent_socket(), key=first["key"], agent=CLAUDE, stable=True
+    )
+
+    second = await launch(repo)
+    broker = await running_broker_object()
+    spare = broker.sessions[second["id"]]
+    # A box prepared well before the agent got round to connecting.
+    spare.last_seen = time.time() - broker_module.RESUMABLE_SECONDS - 1
+
+    two = await Wire.connect(
+        paths.agent_socket(), key=second["key"], agent=CLAUDE, stable=True
+    )
+    assert two.hello["session"] == one.hello["session"]
+    assert spare.released
+
+    await broker.collect()
+    assert second["id"] in broker.sessions
+
+    spare.last_seen = time.time() - broker_module.RELEASED_SECONDS - 1
+    await broker.collect()
+    assert second["id"] not in broker.sessions
+    await two.close()
+    await one.close()
+
+
+async def test_the_probe_deadline_covers_the_wait_for_the_lock(
+    runtime: Path, repo: Path
+) -> None:
+    """The collector budgets for one probe and runs on the broker's own loop.
+    A session whose lock is held by a call waiting on nvim held that loop for
+    as long as the call took, however short the probe's own deadline was."""
+    broker = Broker()
+    session = await broker.launch_session(str(repo), clean=True)
+    await session.ensure()
+
+    held = asyncio.Event()
+
+    async def hold_the_lock() -> None:
+        async with session._lock:
+            held.set()
+            await asyncio.sleep(30)
+
+    holder = asyncio.create_task(hold_the_lock())
+    await held.wait()
+    try:
+        started = time.monotonic()
+        with pytest.raises(NvimError):
+            await session.attached(timeout=0.2)
+        # Busy, not gone: it says so within its budget rather than waiting out
+        # whatever the call holding the lock is doing.
+        assert time.monotonic() - started < 5
+    finally:
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        await broker.kill(session.sid)

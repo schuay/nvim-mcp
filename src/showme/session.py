@@ -33,7 +33,7 @@ import asyncio
 import contextlib
 import secrets
 import time
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from dataclasses import asdict, dataclass, field
 from importlib import resources
 from pathlib import Path
@@ -41,7 +41,7 @@ from typing import Any
 
 from .clamp import Anywhere, Refused, Root
 from .lifecycle import Editor
-from .nvimrpc import NvimGone, NvimRPC
+from .nvimrpc import NvimError, NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
 
 #: A note may explain itself, but it still has to leave the code visible. At 80
@@ -267,14 +267,31 @@ class Session:
     def touch(self) -> None:
         self.last_seen = time.time()
 
-    def accept(self, key: str, host_key: str) -> None:
+    def accept(self, key: str, host_key: str, keep: Collection[str] = ()) -> None:
         """Accept another launch's keys while retaining the original pair.
 
         Earlier clients may still be connected with previously issued keys.
+        `keep` names the keys those connections presented, and a pair holding
+        one is never dropped: the cap is there to stop the list growing over a
+        long conversation, and a client that has stayed connected across that
+        many resumes is the last one that should stop resolving.
         """
         if (key, host_key) not in self.pairs:
             self.also.append([key, host_key])
-            del self.also[:-LAUNCHES_REMEMBERED]
+            self._forget(keep)
+
+    def _forget(self, keep: Collection[str]) -> None:
+        """Drop the oldest pairs no connection is answering with."""
+        surplus = len(self.also) - LAUNCHES_REMEMBERED
+        if surplus <= 0:
+            return
+        remaining = []
+        for pair in self.also:
+            if surplus and not any(key in keep for key in pair):
+                surplus -= 1
+                continue
+            remaining.append(pair)
+        self.also = remaining
 
     def revoke(self) -> None:
         """Replace keys transferred to another session to avoid duplicate matches."""
@@ -669,15 +686,27 @@ class Session:
 
         Return False for a dead editor. Propagate other NvimError failures so
         the collector preserves editors that are too busy to answer.
+
+        The deadline covers the wait for the session lock as well as the
+        request. The collector runs on the broker's own loop and budgets for
+        one probe; a session whose lock is held by a call that is itself
+        waiting on nvim would otherwise hold that loop for as long as the call
+        takes. Failing to reach nvim in time says the same thing either way --
+        busy, not gone -- so it reads as one.
         """
-        async with self._lock:
-            if not self.alive:
-                return False
-            assert self.rpc is not None
-            try:
-                return bool(await self.rpc.request("nvim_list_uis", timeout=timeout))
-            except NvimGone:
-                return False
+        try:
+            async with asyncio.timeout(timeout):
+                async with self._lock:
+                    if not self.alive:
+                        return False
+                    assert self.rpc is not None
+                    return bool(
+                        await self.rpc.request("nvim_list_uis", timeout=timeout)
+                    )
+        except NvimGone:
+            return False
+        except TimeoutError:
+            raise NvimError(f"session {self.sid} was busy for {timeout}s") from None
 
     async def _hand_over(self) -> None:
         """Take a final sync before dropping the connection.
