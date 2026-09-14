@@ -71,6 +71,12 @@ INSTRUCTIONS = (
     "stays pending until you pass its id back in ack, so acknowledge one once "
     "you have answered it.\n"
     "\n"
+    "Nothing you show is seen until a terminal is attached to the session. "
+    "Where the human's shell can open a window one opens by itself; where it "
+    "cannot -- over ssh, most often -- a show comes back with unseen, and they "
+    "go on seeing nothing until you relay it. It names the command they run, "
+    "and no tool of yours attaches a terminal for them.\n"
+    "\n"
     "A call names its session by key, unless this client was launched for one "
     "session and already holds it."
 )
@@ -91,7 +97,9 @@ SHOW_TOOL = types.Tool(
         "id like A2 that you and the human can both say. Batch every location "
         "you are discussing into one call. Notes live in frames: the default "
         "replaces the top frame, push starts a frame for a digression, pop "
-        "drops it when answered. Never closes a tab."
+        "drops it when answered. Never closes a tab. A show that lands on a "
+        "session nobody is watching comes back with unseen: relay that to the "
+        "human before you go on, or they never see what you showed."
     ),
     input_schema=models.schema(ShowRequest),
     output_schema=models.schema(ShowResult),
@@ -114,7 +122,8 @@ READ_TOOL = types.Tool(
         "open. 'notes' gives back the frames and the text of every note on "
         "screen, which is how an agent that did not write them learns what "
         "A2 says. Everything but 'marks' is limited to what this session's "
-        "key reaches, which for a sandboxed agent is the session root."
+        "key reaches: a sandboxed key sees only inside the session root, and "
+        "a key taken on the host sees whatever the human sees."
     ),
     input_schema=models.schema(ReadRequest),
     output_schema=models.schema(ReadResult),
@@ -187,11 +196,25 @@ async def _show(session: Session, root: Root, request: ShowRequest) -> ShowResul
         # a second round trip for the same fact.
         attached = bool(result.get("uis"))
 
+    # Nobody saw it: nothing was attached and no window opened for it. The
+    # broker cannot reach the human, so the agent is told to hand the command
+    # over -- over ssh, where no window can open, that is the only way a
+    # session ever gets a screen.
+    unseen = None
+    if locations and not attached and not opened_ui:
+        unseen = (
+            "Nobody is watching this session, so the human has not seen what "
+            f"you just showed. Tell them to run `showme {session.sid}` in "
+            "another terminal on the machine this session runs on; over ssh "
+            "that is a second shell into the same host."
+        )
+
     return ShowResult(
         **_envelope(session, attached),
         frame=frame,
         popped=popped,
         opened_ui=opened_ui,
+        unseen=unseen,
         ids=ids,
         frames=frames,
         opened=opened,

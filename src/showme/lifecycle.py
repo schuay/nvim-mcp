@@ -17,7 +17,9 @@ A session nobody is watching can also be given a window here. That is an
 administrative act, so it is not in the tool list: an agent cannot ask for it,
 it happens because the agent showed something and nothing was on screen. What
 runs comes from the environment the human's shell handed over when the session
-was made, never from anything a client sends.
+was made, never from anything a client sends. Where that environment can open
+nothing -- over ssh -- the tool layer hands the agent the attach command to
+pass on, which is the only way such a session reaches a screen.
 """
 
 from __future__ import annotations

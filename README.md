@@ -56,9 +56,15 @@ Set `SHOWME_TERMINAL` in the shell you start sessions from, to a terminal
 and whatever it needs before a command -- `ghostty -e`, `kitty`, `alacritty
 -e` -- and a session gets a window of its own the first time an agent shows
 something to it while nothing is on screen. One window per nvim, so closing it
-closes it. No setting, or no display in that shell, and you get the attach
-command instead. An agent cannot ask for a window: it only ever happens
-because it showed you something you were not looking at.
+closes it. An agent cannot ask for a window: it only ever happens because it
+showed you something you were not looking at.
+
+Over ssh nothing can open, so the agent hands you the command instead. A show
+to a session with no terminal on it comes back saying nobody is watching and
+naming `showme 3`, which you run in a second shell on the same host; from then
+on the session is on your screen and shows land there. Run it before you ask
+for anything and there is nothing to hand over: the session exists from the
+moment the agent's client starts, so `showme ls` already lists it.
 
 ## How it fits together
 

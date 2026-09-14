@@ -6,12 +6,16 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 from collections.abc import AsyncIterator
 from pathlib import Path
 
 import pytest
+from conftest import admin
+from mcpwire import Wire
 
+from showme import paths
 from showme.lifecycle import TERMINAL
 from showme.session import Location, Session
 
@@ -53,6 +57,26 @@ async def shown(session: Session, repo: Path) -> dict:
     return await session.show(
         [Location(repo / "src" / "main.c", line=1, text="look")], "review", False
     )
+
+
+async def shown_over_mcp(env: dict[str, str] | None, repo: Path) -> dict:
+    """Show one location the way an agent does, for what the tools hand back.
+
+    The relay is decided in the tool layer rather than in the session, so it
+    takes a call across the socket to see it.
+    """
+    reply = await admin({"cmd": "new", "root": str(repo), "env": env})
+    assert reply["ok"], reply
+    wire = await Wire.connect(paths.agent_socket())
+    result = await wire.call(
+        "show",
+        {
+            "session": reply["key"],
+            "locations": [{"file": "src/main.c", "text": "look"}],
+        },
+    )
+    assert not result.get("isError"), result
+    return {"id": reply["id"], **json.loads(result["content"][0]["text"])}
 
 
 @pytest.fixture
@@ -103,3 +127,27 @@ async def test_no_terminal_and_no_display_open_nothing(
     assert (await shown(blind, repo))["opened_ui"] is False
     await asyncio.sleep(0.2)
     assert not log.exists()
+
+
+async def test_a_show_nobody_can_see_hands_back_the_attach_command(
+    running_broker: Path, repo: Path
+) -> None:
+    # What ssh gets every time: no window can open, so the only way this
+    # session reaches a screen is the agent passing the command on.
+    payload = await shown_over_mcp(env_without(TERMINAL), repo)
+    assert payload["attached"] is False
+    assert payload.get("opened_ui") is None
+    assert f"showme {payload['id']}" in payload["unseen"]
+    assert payload["attach_cmd"] == f"showme {payload['id']}"
+
+
+async def test_a_show_that_opens_a_window_leaves_nothing_to_relay(
+    running_broker: Path, repo: Path, terminal: tuple[Path, Path]
+) -> None:
+    script, log = terminal
+    payload = await shown_over_mcp(env_with(script, WAYLAND_DISPLAY="wayland-0"), repo)
+    assert payload["opened_ui"] is True
+    # A window is on its way, so telling the human to open one would send them
+    # after a second editor on the same session.
+    assert "unseen" not in payload
+    await recorded(log)

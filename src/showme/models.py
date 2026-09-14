@@ -45,7 +45,13 @@ SESSION_FIELD = Field(
 
 
 class LocationSpec(Request):
-    file: str = Field(description="Path, absolute or relative to the session root")
+    file: str = Field(
+        description=(
+            "The file to open. A relative path is taken against the session "
+            "root; an absolute path anywhere on the host works, unless this "
+            "session's key is a sandbox key, which reaches only inside it."
+        )
+    )
     line: int = Field(default=1, ge=1, description="1-based line; defaults to 1")
     end_line: int | None = Field(
         default=None, ge=1, description="Last line of a highlighted range"
@@ -118,7 +124,9 @@ class Envelope(Result):
     """
 
     session: str
-    attach_cmd: str = Field(description="How the human attaches a terminal")
+    attach_cmd: str = Field(
+        description="The command the human runs to attach a terminal to this session"
+    )
     marks_pending: int = Field(description="Questions waiting in read(what='marks')")
     attached: bool = Field(description="Whether a human is looking right now")
 
@@ -144,6 +152,16 @@ class ShowResult(Envelope):
     opened_ui: bool | None = Field(
         default=None,
         description="A window was opened for this session; the human is about to see it",
+    )
+    unseen: str | None = Field(
+        default=None,
+        description=(
+            "Present only when the human cannot see what you just showed: "
+            "nothing is attached to this session and no window opened for it. "
+            "Pass it on to them as it stands -- it names the command they run, "
+            "and nothing you can call attaches a terminal for them. Until one "
+            "is attached, every show goes to a screen nobody is looking at."
+        ),
     )
     ids: list[str] = Field(
         description="Ids of the notes just shown, in the order given, to refer to them by"
