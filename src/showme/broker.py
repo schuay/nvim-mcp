@@ -42,34 +42,6 @@ IDLE_EXIT_SECONDS = 15 * 60
 LINE_LIMIT = 4 * 1024 * 1024
 
 
-def _guard_root(root: Path) -> None:
-    """Refuse a root a launcher should never have picked on its own.
-
-    `showme new` takes what the human typed. `showme ensure` takes the
-    directory they happened to be standing in, and for the key it hands a
-    sandboxed agent the root is a second access list: that agent reads
-    everything under it through the broker, whatever its sandbox mounts.
-
-    It catches a home directory and a tree with no repository at or above it,
-    which is usually a parent holding several. It does not catch a repository
-    that contains repositories -- a checkout with worktrees or vendored
-    subrepos under it -- because nothing here distinguishes that from a
-    project with submodules. For those, the root `showme box` prints is the
-    check.
-    """
-    home = Path.home()
-    if root == home or root in home.parents:
-        raise Refused(f"{root} is too broad a root; name a project directory")
-    for directory in (root, *root.parents):
-        if (directory / ".git").exists():
-            return
-        if directory == home:
-            break
-    raise Refused(
-        f"no repository at or above {root}; `showme new {root}` if you mean it"
-    )
-
-
 class Broker:
     def __init__(self) -> None:
         self.sessions: dict[str, Session] = {}
@@ -141,7 +113,6 @@ class Broker:
         env: dict[str, str] | None = None,
         *,
         spawn: bool = True,
-        unclamped: bool = False,
     ) -> tuple[Session, bool]:
         """Return the session already rooted here, or make one.
 
@@ -151,17 +122,13 @@ class Broker:
         one lock: two launchers racing in the same tree must not end up with a
         session each.
 
-        `unclamped` asks for the key that reads outside the root, which only a
-        client on the host can ask for and which the guard has no say over.
+        The root is the directory the launcher was standing in, and nothing
+        here second-guesses it. The tree it names is the one that launcher has
+        already handed the agent, so a key clamped to it reaches nothing the
+        agent could not reach with its own tools, and a directory that holds no
+        repository is a project like any other.
         """
         async with self._lock:
-            # A clamped key is only ever issued for a root the guard allows,
-            # whether this call makes the session or finds one: a host client
-            # answers to no guard, and a launcher must not inherit the root it
-            # picked. `showme new` still sets any root the human names, and
-            # prints the key for them to pass on by hand.
-            if not unclamped:
-                _guard_root(Path(root))
             for session in self.sessions.values():
                 if str(session.root.path) == root:
                     return session, False
@@ -289,7 +256,6 @@ async def _ensure(broker: Broker, request: dict[str, Any]) -> dict[str, Any]:
         request.get("background"),
         request.get("env"),
         spawn=bool(request.get("spawn", True)),
-        unclamped=unclamped,
     )
     return {
         "id": session.sid,

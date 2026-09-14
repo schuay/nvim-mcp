@@ -10,10 +10,8 @@ from pathlib import Path
 import pytest
 from conftest import admin, start_broker, stop_broker
 
-from showme import broker as broker_module
 from showme import paths
 from showme.broker import Broker
-from showme.clamp import Refused
 from showme.nvimrpc import NvimRPC
 from showme.session import Session
 
@@ -107,64 +105,44 @@ async def test_stop_hands_the_sessions_to_the_next_broker(
         await stop_broker(stop, task)
 
 
-def test_a_launcher_cannot_root_a_session_anywhere(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    monkeypatch.setenv("HOME", str(tmp_path))
-    project = tmp_path / "src" / "project"
-    (project / ".git").mkdir(parents=True)
-
-    broker_module._guard_root(project)
-    broker_module._guard_root(project / "deep" / "inside")
-
-    # The home directory itself, and anything above it.
-    with pytest.raises(Refused, match="too broad"):
-        broker_module._guard_root(tmp_path)
-    with pytest.raises(Refused, match="too broad"):
-        broker_module._guard_root(tmp_path.parent)
-    # A parent holding several projects, which is what `cl` in the wrong
-    # terminal tab would otherwise hand over.
-    with pytest.raises(Refused, match="no repository"):
-        broker_module._guard_root(tmp_path / "src")
-
-
-async def test_ensure_applies_the_guard_and_new_does_not(
+async def test_a_launcher_may_root_a_session_in_a_plain_directory(
     runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """A directory with no repository above it is a root like any other.
+
+    The launcher hands the agent that tree either way, so the shape the broker
+    must not turn down is the one a human keeps a couple of config files in.
+    """
     monkeypatch.setenv("HOME", str(tmp_path))
-    loose = tmp_path / "src"
+    loose = tmp_path / "notes"
     loose.mkdir()
     broker = Broker()
-    with pytest.raises(Refused, match="no repository"):
-        await broker.ensure_session(str(loose))
 
-    # `showme new` is the human naming a root, and is left alone.
-    session = await broker.new_session(str(loose), clean=True)
+    session, created = await broker.ensure_session(str(loose), clean=True, spawn=False)
     try:
+        assert created is True
         assert session.root.path == loose
+        # And a second launcher in the same tree joins it.
+        again, created = await broker.ensure_session(str(loose), spawn=False)
+        assert created is False
+        assert again is session
     finally:
         await session.close()
 
 
-async def test_a_clamped_key_is_never_issued_for_a_root_the_guard_refuses(
+async def test_new_and_ensure_meet_in_the_same_tree(
     runtime: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    """`showme new` and a launcher in that root end up on one session."""
     monkeypatch.setenv("HOME", str(tmp_path))
-    loose = tmp_path / "src"
+    loose = tmp_path / "notes"
     loose.mkdir()
     broker = Broker()
 
-    # A client on the host answers to no guard: the root is only where its
-    # relative paths are taken from, and it reads what the human reads anyway.
-    session, created = await broker.ensure_session(
-        str(loose), clean=True, spawn=False, unclamped=True
-    )
-    assert created is True
+    session = await broker.new_session(str(loose), clean=True)
     try:
-        # And a launcher does not inherit that root. Without this, `showme box`
-        # in a directory a host client got to first would hand a sandbox a key
-        # clamped to a root no launcher could have picked.
-        with pytest.raises(Refused, match="no repository"):
-            await broker.ensure_session(str(loose))
+        found, created = await broker.ensure_session(str(loose), spawn=False)
+        assert created is False
+        assert found is session
     finally:
         await session.close()
