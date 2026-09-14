@@ -136,7 +136,13 @@ class Envelope(Result):
         description="The command the human runs to attach a terminal to this session"
     )
     marks_pending: int = Field(description="Questions waiting in read(what='marks')")
-    attached: bool = Field(description="Whether a human is looking right now")
+    attached: bool = Field(
+        description=(
+            "Whether a terminal was attached when this call was answered. A "
+            "window opened for this call attaches after it, so a show that "
+            "opened one reports this false and opened_ui true."
+        )
+    )
 
 
 class Refusal(Result):
