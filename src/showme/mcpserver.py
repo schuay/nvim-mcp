@@ -62,9 +62,7 @@ INSTRUCTIONS = (
     "they ask to see or be pointed at code, and when your answer is about "
     "lines they would rather read in place than in chat. Batch the locations "
     "of one answer into one call, and do not open a tab to quote a value "
-    "back at them. It shows files on disk, so anything you generate -- a diff "
-    "you have been asked to annotate -- goes to a file inside the session root "
-    "first and is shown by path.\n"
+    "back at them.\n"
     "\n"
     "read reports their side: where the cursor is and what they last "
     "selected, an open buffer including edits they have not saved, the open "
@@ -101,14 +99,9 @@ SHOW_TOOL = types.Tool(
         "replaces the top frame, push starts a frame for a digression, pop "
         "drops it when answered. Never closes a tab. A show that lands on a "
         "session nobody is watching comes back with unseen: relay that to the "
-        "human before you go on, or they never see what you showed.\n"
-        "\n"
-        "It shows files on disk and nothing else, so anything you generate is "
-        "shown by writing it out first. Asked to annotate a diff: put `git "
-        "diff` in a file and hang the notes on its lines. Write it inside the "
-        "session root, which your key reaches whether or not it is sandboxed "
-        "-- `.git/review.diff` keeps it out of the human's `git status`, and "
-        "the name is what gets it highlighted as a diff."
+        "human before you go on, or they never see what you showed. It shows "
+        "files on disk, so anything you generate is written out before it can "
+        "be shown."
     ),
     input_schema=models.schema(ShowRequest),
     output_schema=models.schema(ShowResult),
