@@ -5,12 +5,13 @@ from __future__ import annotations
 
 import asyncio
 import fcntl
+import os
 from pathlib import Path
 
 import pytest
 from conftest import admin, start_broker, stop_broker
 
-from showme import paths
+from showme import broker, paths
 from showme.broker import Broker
 from showme.nvimrpc import NvimRPC
 from showme.session import Session
@@ -146,3 +147,51 @@ async def test_a_launch_does_not_take_over_the_session_a_human_made(
     finally:
         await session.close()
         await launched.close()
+
+
+async def test_a_second_broker_does_not_take_the_agent_socket(
+    runtime: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unlinking a socket someone is serving leaves them holding the inode, so
+    both brokers run and later clients reach only the newer one. Two registries
+    behind one path is how a key stops naming anything."""
+    stop, task = await start_broker()
+    try:
+        created = await admin({"cmd": "new", "root": str(repo)})
+        # A lock somewhere else is exactly what a runtime directory that moved
+        # with the environment produced, so put it there and let the socket
+        # itself be the only thing left to stop the second broker.
+        monkeypatch.setattr(paths, "lock_path", lambda: runtime / "other.lock")
+        second = asyncio.Event()
+        intruder = asyncio.create_task(broker.serve(second))
+        await asyncio.wait_for(intruder, 30)
+
+        assert paths.answering(paths.agent_socket())
+        sessions = (await admin({"cmd": "ls"}))["sessions"]
+        assert [s["key"] for s in sessions] == [created["key"]]
+    finally:
+        await stop_broker(stop, task)
+
+
+async def test_the_runtime_directory_does_not_move_with_a_scrubbed_environment(
+    runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """codex hands its MCP servers eight variables, none of them
+    XDG_RUNTIME_DIR. Dropping straight to /tmp put the admin socket and the
+    broker lock where the same user's shell would never look."""
+    monkeypatch.delenv("XDG_RUNTIME_DIR")
+    run = Path(f"/run/user/{os.getuid()}")
+    if not run.is_dir():
+        pytest.skip("no /run/user directory on this host")
+    assert paths.runtime_dir() == run / "showme"
+
+
+async def test_the_broker_lock_does_not_move_with_the_environment(
+    runtime: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The lock admits one broker to the agent socket, so it belongs beside
+    it: taken in the runtime directory, two clients with different
+    environments each took one nobody else was holding."""
+    first = paths.lock_path()
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(runtime / "elsewhere"))
+    assert paths.lock_path() == first

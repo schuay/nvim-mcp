@@ -1,18 +1,18 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Locate the broker's sockets, lock, and state.
+"""Locate broker sockets, locks, and persistent state.
 
-Two directories with different exposure. The agent directory is meant to be
-bind-mounted into a sandbox, so it holds only the broker's own socket and the
-splice client. Every nvim listen socket stays in the runtime directory, which is
-never mounted: raw nvim RPC runs arbitrary Lua, so an nvim socket reachable from
-a sandbox hands out the host.
+The agent directory may be mounted into a sandbox and contains only the broker
+socket and splice client. The private runtime directory contains every nvim
+socket. Exposing an nvim socket would let a sandbox run arbitrary Lua on the
+host.
 """
 
 from __future__ import annotations
 
 import os
+import socket
 import stat
 from pathlib import Path
 
@@ -20,9 +20,8 @@ from pathlib import Path
 def _mkdir(path: Path) -> Path:
     """Create a private directory, tightening one left by an older version.
 
-    ``mkdir`` applies its mode only when it creates the directory, so a
-    directory already there keeps whatever permissions it has. These hold a
-    socket that talks to the human's editor.
+    ``mkdir`` applies its mode only to new directories. Existing directories
+    may retain permissions that expose the human's editor socket.
     """
     path.mkdir(mode=0o700, parents=True, exist_ok=True)
     info = path.lstat()
@@ -36,8 +35,15 @@ def _mkdir(path: Path) -> Path:
 
 
 def runtime_dir() -> Path:
-    """Return the private directory for sockets that no sandbox may reach."""
-    base = os.environ.get("XDG_RUNTIME_DIR") or f"/tmp/showme-{os.getuid()}"  # noqa: S108
+    """Return the private directory for sockets that no sandbox may reach.
+
+    Some MCP clients omit XDG_RUNTIME_DIR. Prefer its usual `/run/user` location
+    when available so those clients find sockets created from a normal shell.
+    """
+    base = os.environ.get("XDG_RUNTIME_DIR")
+    if not base:
+        run = Path(f"/run/user/{os.getuid()}")
+        base = str(run) if run.is_dir() else f"/tmp/showme-{os.getuid()}"  # noqa: S108
     return _mkdir(Path(base) / "showme")
 
 
@@ -53,23 +59,21 @@ def agent_dir() -> Path:
 def box_dir() -> Path:
     """Return the directory holding one entry per sandbox launch.
 
-    A launcher leaves a session key in a private subdirectory and binds that
-    subdirectory, and only it, into the box it is starting. The parent is
-    deliberately somewhere no bind spec mounts, so a box sees its own entry and
-    cannot enumerate anyone else's. Not created here: inside a box this path is
-    read-only.
+    Each launcher binds one private key subdirectory into its sandbox. The
+    parent is outside every bind specification, so a sandbox cannot enumerate
+    other launch keys. Do not create the parent here because it is read-only
+    inside a sandbox.
     """
     base = os.environ.get("XDG_STATE_HOME") or Path.home() / ".local" / "state"
     return Path(base) / "showme-box"
 
 
 def sandboxed() -> bool:
-    """Whether this client is behind a sandbox mount rather than on the host.
+    """Return whether the agent directory is mounted read-only.
 
-    The agent directory is bind-mounted read-only into a box, which is the
-    same property that stops a broker starting in there. A client that can
-    write it can also reach the admin socket and everything else this user
-    owns, so there is nothing a sandbox is keeping from it.
+    A read-only mount identifies sandbox clients and prevents them from
+    starting a broker. A writable directory identifies host clients, which can
+    also reach the admin socket.
     """
     return not os.access(agent_dir(), os.W_OK)
 
@@ -77,8 +81,8 @@ def sandboxed() -> bool:
 def box_key() -> str | None:
     """Return the session key a launcher left for this client, if any.
 
-    Only a sandboxed client takes one: on the host the directory holds an
-    entry per live box, none of which belongs to the client asking.
+    Host clients cannot select one entry from the directory because it contains
+    keys for every live sandbox.
     """
     if not sandboxed():
         return None
@@ -114,7 +118,25 @@ def nvim_socket(session_key: str) -> Path:
 
 
 def lock_path() -> Path:
-    return runtime_dir() / "broker.lock"
+    """Return the file that admits one broker.
+
+    Keep the lock beside the agent socket it guards. Environment-dependent
+    runtime paths could otherwise admit multiple brokers for one socket.
+    """
+    return agent_dir() / "broker.lock"
+
+
+def answering(socket_path: Path) -> bool:
+    """Return whether a process accepts connections on a possibly stale socket."""
+    probe = socket.socket(socket.AF_UNIX)
+    try:
+        probe.connect(str(socket_path))
+    except OSError:
+        return False
+    else:
+        return True
+    finally:
+        probe.close()
 
 
 def broker_log() -> Path:

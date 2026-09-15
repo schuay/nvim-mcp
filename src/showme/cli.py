@@ -58,6 +58,12 @@ def _ensure_broker(timeout: float = 10.0) -> None:
         pass
     else:
         return
+    if paths.answering(paths.agent_socket()):
+        # A runtime-path mismatch can hide the admin socket while the shared
+        # agent socket remains live. Do not start a competing broker.
+        raise SystemExit(
+            "showme: a broker is running, but its admin socket is elsewhere"
+        )
     # Give the broker its own session so it survives this shell.
     with paths.broker_log().open("ab") as log:
         subprocess.Popen(

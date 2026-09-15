@@ -615,6 +615,11 @@ async def serve(stop: asyncio.Event | None = None) -> None:
         broker.stop = stop
     await broker.restore()
     for socket_path in (paths.admin_socket(), paths.agent_socket()):
+        # Check for a broker that used another lock path. Unlinking its active
+        # socket would strand that listener while routing new clients here.
+        if paths.answering(socket_path):
+            log.info("another broker is serving %s", socket_path)
+            return
         socket_path.unlink(missing_ok=True)
 
     admin = await asyncio.start_unix_server(
