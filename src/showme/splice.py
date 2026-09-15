@@ -1,25 +1,16 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Relay this process's stdin and stdout to the broker's socket, across
-broker restarts.
+"""Relay MCP stdio to the broker across broker restarts.
 
-An MCP client launches this as its stdio server. It forwards JSON-RPC lines
-and holds no schema, so it cannot drift from the broker, and it imports
-nothing outside the standard library because it also runs inside a sandbox
-that cannot install anything. The broker writes a copy of this file next to
-its agent socket.
+Forward complete JSON-RPC lines without interpreting tool schemas. This file
+uses only the standard library because the broker also copies it beside the
+agent socket for sandbox clients.
 
-The line it sends before any JSON-RPC names both the session key it was
-launched with and the conversation it serves, which is what the broker keys a
-session on.
-
-The client sees one MCP session for as long as it keeps this process. When
-the broker goes away, the connection is made again on the client's next
-message: the handshake the client sent at the start is replayed and its
-second answer dropped, so the client never learns the other side changed.
-A request that was in flight when the connection broke gets an error
-telling the caller to retry, since the broker that took it is gone.
+Send the launch key and conversation ID before JSON-RPC so the broker can claim
+the correct session. After a disconnect, reconnect on the next client message,
+replay the MCP handshake, and discard its duplicate response. Fail requests
+that were in flight because the previous broker cannot answer them.
 """
 
 from __future__ import annotations
@@ -34,15 +25,11 @@ import uuid
 from collections.abc import Callable
 from typing import Any
 
-#: How long to keep trying the socket after a loss. A broker restarted by
-#: `showme` answers within a second; longer means nobody is restarting it.
+#: Allow enough time for a broker restarted by `showme` to begin listening.
 RECONNECT_WINDOW = float(os.environ.get("SHOWME_RECONNECT_WINDOW", "5"))
 CONNECTION_LOST = -32000
 
-#: The field naming the line a client sends before any JSON-RPC to say which
-#: session it was launched for, and the broker's answer to it. Connection
-#: setup, the same layer as the handshake replayed below: no tool is named and
-#: no argument is rewritten, so this side still holds no schema.
+#: Field for the pre-JSON-RPC session claim and the broker's response.
 HELLO = "showme"
 
 #: Harness variables supplying conversation ids that survive resume.
@@ -57,7 +44,7 @@ def identify() -> tuple[str, bool]:
     for name in SESSION_VARS:
         value = os.environ.get(name)
         if value:
-            # Include the harness variable to avoid cross-harness id collisions.
+            # Include the variable name to prevent IDs from colliding across harnesses.
             return f"{name}:{value}", True
     return f"launch:{uuid.uuid4().hex}", False
 
@@ -100,21 +87,15 @@ class Splice:
         key: str | None = None,
     ):
         self.socket_path = socket_path
-        #: The session this client was launched for, presented on every
-        #: connection so a client in a sandbox never has to be told a key.
+        #: Present this launch key on every connection without exposing it to MCP.
         self.key = key
-        #: Who the broker gives that session to. Named once per process and
-        #: presented with the key on every connection, so a broker restart
-        #: hands the same conversation back the session it was using.
+        #: Keep one conversation identity across broker reconnects.
         self.agent, self.stable = identify()
-        #: Asked for a broker when nothing answers the socket. On the host this
-        #: starts one; a sandbox either has no way to ask (None) or starts one
-        #: that cannot claim the read-only agent directory.
+        #: Host callback that starts a missing broker; sandboxes receive none.
         self.revive = revive
         self.sock: socket.socket | None = None
         self.from_sock = Lines()
-        #: The client's `initialize` request and `initialized` notification,
-        #: replayed to a new broker so the client need not know about it.
+        #: MCP handshake replayed after broker reconnects.
         self.handshake: list[bytes] = []
         self.initialize_id: Any = None
         #: Requests sent to the broker and not yet answered, by id.
@@ -149,8 +130,7 @@ class Splice:
                         try:
                             chunk = self.sock.recv(65536) if self.sock else b""
                         except OSError:
-                            # A reset counts the same as a clean close: the
-                            # broker is gone either way.
+                            # Treat a reset as broker loss.
                             chunk = b""
                         if not chunk:
                             self.lost()
@@ -198,7 +178,7 @@ class Splice:
         write_all(self.out, line)
 
     def lost(self) -> None:
-        """The broker went away. Nothing it was working on will be answered."""
+        """Close the broker connection and fail every pending request."""
         if self.sock is not None:
             self.selector.unregister(self.sock.fileno())
             self.sock.close()
@@ -220,19 +200,17 @@ class Splice:
         write_all(self.out, json.dumps(error).encode() + b"\n")
 
     def connect(self, first: bool) -> bool:
-        """Connect to the broker, and bring a new one up to date.
+        """Connect to the broker and replay state after a restart.
 
-        A broker already listening is taken as it stands, and one is asked for
-        only when nothing answers. That is what lets a client in a sandbox run
-        this against the host's broker: the socket it was given is served
-        already, so no second broker is ever started behind it.
+        Invoke the host's restart callback only when no broker answers. Sandbox
+        clients have no callback and therefore cannot start a second broker.
         """
         sock = self._dial(0)
         if sock is None:
             if self.revive is not None:
                 self.revive()
             elif first:
-                # Nothing answers, nothing to ask, and no restart is under way.
+                # A sandbox's initial failure has no restart to wait for.
                 return False
             sock = self._dial(RECONNECT_WINDOW)
         if sock is None:
@@ -291,8 +269,7 @@ class Splice:
                             file=sys.stderr,
                         )
                         return False
-                    # Nothing else can have arrived: the broker sends nothing
-                    # until it is spoken to.
+                    # The broker sends no unsolicited data before MCP begins.
                     self.from_sock = lines
                     sock.settimeout(None)
                     return True
@@ -333,8 +310,7 @@ def splice(
 
 
 def main() -> int:
-    # The key is a file rather than an argument: an MCP client config is
-    # readable inside the box, and a secret in it would be too.
+    # Keep the key out of sandbox-readable MCP client arguments.
     if not 2 <= len(sys.argv) <= 3:
         print("usage: splice.py <socket> [key-file]", file=sys.stderr)
         return 2

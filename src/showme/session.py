@@ -3,28 +3,16 @@
 
 """Own one headless nvim and apply agent requests to it.
 
-A session is one agent conversation's. Two agents started in the same tree get
-one each, and a conversation that is resumed is given back the one it had, so
-no set of frames is ever inherited by an agent that did not open it. The
-session outlives both the terminal a human attaches and the agent that writes
-to it: the review is usually read after the agent has stopped, which is why
-nothing ends a session at the moment its client goes away.
+Each conversation owns a session, including across resume. Sessions outlive
+their agent and attached terminal so the human can review frames later.
 
-A key is the capability, and a session has two: the one a launcher hands a
-sandboxed client, clamped to the root the human chose, and the one only the
-admin socket gives out, which reads anywhere because the client holding it is
-the human. Which key a call arrived with decides what it may open; the session
-itself decides nothing.
+A sandbox key restricts access to the human-selected root. A host key from the
+admin socket permits access outside that root. Each call uses the access of the
+key it presented.
 
-The session is the record of what it shows and what the human has handed
-back. nvim draws that record and reports the two things only it can know:
-where a note has moved to as the human edits, and what the human asked. Both
-arrive as a sync with every exchange, and nvim hands over a final one before
-it exits. Notes carry nothing of nvim's, so the record survives it.
-
-The nvim itself is the Editor's concern: it may be one this broker spawned or
-one left running by a previous broker, and the session only has to know which
-it got, to set up a fresh one or catch up with an adopted one.
+The session records frames and human marks. nvim renders that state and reports
+updated note positions and new marks on every exchange and before exit. The
+`Editor` owns nvim startup, adoption, and shutdown.
 """
 
 from __future__ import annotations
@@ -44,27 +32,19 @@ from .lifecycle import Editor
 from .nvimrpc import NvimError, NvimGone, NvimRPC
 from .paths import nvim_log, nvim_socket
 
-#: A note may explain itself, but it still has to leave the code visible. At 80
-#: columns a wrapped line carries about 65 characters, so this is roughly three
-#: quarters of a 40-row terminal for a single note.
+#: At 80 columns this occupies about 30 rows, leaving code visible.
 NOTE_LIMIT = 2000
 
-#: Lines a note may draw. The character limit alone does not bound the band
-#: now that line breaks survive: a snippet of short lines would spend the same
-#: characters on three times the rows and bury the code it annotates.
+#: Bound short explicit lines that could exceed the character-based row estimate.
 NOTE_LINES = 30
 
-#: A tab in a virtual line expands against the window's own tab stops, which
-#: are not the ones the snippet was written against and count from the band's
-#: left edge rather than the code's. Expand here instead, at nvim's default.
+#: Expand tabs before display because virtual-line tab stops start at the band edge.
 TAB_WIDTH = 8
 
-#: Bytes of buffer text a mark carries. A question is about a passage, and an
-#: agent that needs more can read the file.
+#: Bound text copied into a mark; agents can read more from the file.
 MARK_TEXT_LIMIT = 16 * 1024
 
-#: The Lua half of the session, run once per nvim. It is shipped beside this
-#: module rather than embedded in it so it reads as Lua.
+#: Keep the nvim half as readable Lua and load it once per editor process.
 SESSION_INIT = resources.files(__package__).joinpath("session.lua").read_text()
 
 SHOW = "return ShowMe.show(...)"
@@ -75,20 +55,15 @@ SYNC = "return ShowMe.sync()"
 def clean(text: str) -> str:
     """Reduce a note to printable lines within the note's limits.
 
-    Line breaks are the one piece of layout a note keeps, because reflowing
-    them away is what turns a snippet into a paragraph. The Lua half draws the
-    lines as they are and breaks only what overruns the window.
-
-    Everything else goes. A newline inside a virt_text chunk is not a line
-    break to nvim, which draws it as ^@, so the breaks have to arrive as
-    separate lines; an escape sequence would reach the human's terminal.
+    Preserve line breaks so snippets retain their layout; Lua wraps only lines
+    wider than the window. Remove other control characters because nvim renders
+    embedded newlines as `^@` and could pass escape sequences to the terminal.
     """
     lines: list[str] = []
     for line in text.expandtabs(TAB_WIDTH).split("\n"):
         printable = "".join(ch if ch.isprintable() else " " for ch in line)
         stripped = printable.rstrip()
-        # Leading and repeated blank lines would be spent on empty rows of
-        # band, which cost the same as a row carrying text.
+        # Remove blank rows that consume the limited note height without content.
         if stripped or (lines and lines[-1]):
             lines.append(stripped)
     while lines and not lines[-1]:
@@ -103,17 +78,14 @@ def clean(text: str) -> str:
 
 @dataclass
 class Location:
-    #: Already resolved against the session root. Resolving once keeps the
-    #: window between the check and nvim's open as small as it can be here.
+    #: Reuse the path that passed the root check when opening it in nvim.
     file: Path
     line: int = 1
     end_line: int | None = None
     text: str = ""
 
 
-#: Frames a session may hold. At the cap a push is refused rather than the
-#: bottom frame dropped, and the cap is what keeps notes from pushing the code
-#: off the screen.
+#: Refuse pushes at this depth so notes cannot push all code off screen.
 FRAME_LIMIT = 4
 
 #: Maximum number of additional launch key pairs retained.
@@ -125,10 +97,8 @@ FRAME_LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 class Note:
     """One annotated location, as the session records it.
 
-    The id is the frame's letter and a number the frame never reuses, so a
-    mark that names the note it was asked on keeps naming it after later
-    shows. The line is where nvim last reported the note, which follows the
-    human's edits.
+    Frames never reuse note numbers, so marks retain valid note references
+    after later shows. The line follows nvim's anchor as the human edits.
     """
 
     id: str
@@ -142,10 +112,9 @@ class Note:
 class Frame:
     """One set of locations with its notes.
 
-    Frames stack: a review is a frame, a question asked in the middle of it is
-    a digression pushed above it and popped when answered. The letter is
-    taken at push time and held until the frame is popped, so popping a frame
-    below never renames the ones above.
+    Push digressions above the current review and pop them when answered. A
+    frame keeps its letter until removal, so popping lower frames does not
+    rename references above them.
     """
 
     letter: str
@@ -180,52 +149,35 @@ class Frame:
 class Session:
     sid: str
     key: str
-    #: The key a client takes for itself over the admin socket, which reads
-    #: outside the root. Never printed: `ls`, `new` and `box` all hand out the
-    #: clamped one, so there is nowhere to copy this from into a box.
+    #: Admin-socket key that grants access outside the root. User-facing
+    #: commands print only the clamped key to keep this out of sandboxes.
     host_key: str
-    #: Where a relative path is taken from and what nvim runs in. The boundary
-    #: for a clamped key, and only a base for the other.
+    #: Base for relative paths and nvim's cwd; also the clamped-key boundary.
     root: Root
     socket: Path
-    #: Start nvim without the human's config. Their plugins run in this session
-    #: too, and one that authenticates or installs on startup blocks it.
+    #: Skip plugins that could block startup for authentication or installation.
     clean: bool = False
-    #: 'light' or 'dark', taken from the human's terminal. A headless nvim
-    #: cannot detect it.
+    #: Human terminal background, which headless nvim cannot detect.
     background: str | None = None
-    #: The environment nvim runs with: the shell that ran `showme new`, so the
-    #: session sees the same PATH and display the human does. Kept for the
-    #: respawn after `:q`.
+    #: Saved human environment for nvim startup and respawn.
     env: dict[str, str] | None = None
-    #: Conversation id supplied by the client at hello.
     agent: str | None = None
-    #: Whether the harness id survives MCP process restarts.
     stable: bool = False
-    #: Last activity or retention refresh; ignored while clients hold the session.
     last_seen: float = field(default_factory=time.time)
     #: Additional [clamped, unclamped] key pairs from resumed launches.
     also: list[list[str]] = field(default_factory=list)
-    #: Manual sessions persist until explicitly killed.
     human: bool = False
-    #: Superseded launcher session awaiting collection.
     released: bool = False
-    #: Suppress repeated handover notices until the broker restarts.
     warned: bool = field(default=False, repr=False)
-    #: What the session shows, bottom frame first, and what the human has
-    #: handed back. nvim draws this; it does not own it.
+    #: Broker-owned display state and human replies, with frames bottom first.
     frames: list[Frame] = field(default_factory=list)
     marks: list[dict[str, Any]] = field(default_factory=list)
-    #: Called when the record changes outside a tool call, so the broker can
-    #: save it. Marks and positions can arrive from nvim on their own.
+    #: Persist marks and positions received outside a tool call.
     on_change: Callable[[], None] | None = None
     editor: Editor = field(init=False, repr=False)
-    #: Orders every exchange with nvim, including starting it. Two callers
-    #: that find the session dead at the same moment would otherwise each
-    #: spawn an nvim, and only one of them would be the session's.
+    #: Serialize state exchanges and prevent concurrent nvim startup.
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
-    #: Work started by a notification from nvim, which cannot be awaited on
-    #: the read loop. Kept so it is not collected before it runs.
+    #: Retain tasks spawned from synchronous nvim callbacks until completion.
     _tasks: set[asyncio.Task[None]] = field(default_factory=set, repr=False)
 
     def __post_init__(self) -> None:
@@ -270,11 +222,8 @@ class Session:
     def accept(self, key: str, host_key: str, keep: Collection[str] = ()) -> None:
         """Accept another launch's keys while retaining the original pair.
 
-        Earlier clients may still be connected with previously issued keys.
-        `keep` names the keys those connections presented, and a pair holding
-        one is never dropped: the cap is there to stop the list growing over a
-        long conversation, and a client that has stayed connected across that
-        many resumes is the last one that should stop resolving.
+        `keep` contains keys presented by live connections. Never evict a pair
+        containing one of those keys when bounding the history across resumes.
         """
         if (key, host_key) not in self.pairs:
             self.also.append([key, host_key])
@@ -313,7 +262,7 @@ class Session:
         socket: Path | None = None,
         human: bool = False,
     ) -> Session:
-        # The short id is for humans to type; the secret is what authorizes.
+        # The short ID is only a label; the random key authorizes access.
         key = key or f"{sid}-{secrets.token_hex(12)}"
         return cls(
             sid=sid,
@@ -324,8 +273,8 @@ class Session:
             key=key,
             host_key=host_key or f"{sid}-{secrets.token_hex(12)}",
             root=Root.of(root),
-            # Unique socket paths prevent an exiting nvim from unlinking a successor
-            # socket. Restore the saved path because session keys can change.
+            # A unique path prevents an exiting nvim from unlinking its
+            # successor's socket. Restore saved paths across key changes.
             socket=socket or nvim_socket(key),
         )
 
@@ -358,11 +307,8 @@ class Session:
             background=state.get("background"),
             env=state.get("env"),
             key=state["key"],
-            # A file written before there were two keys gets a fresh one. No
-            # client can be holding the key it never had, and a splice that
-            # reconnects after a restart replays the one it was given.
+            # Older state has no host key, so generate one that no client can hold.
             host_key=state.get("host_key"),
-            # Store version 4 records the socket path independently of keys.
             socket=Path(state["socket"]) if state.get("socket") else None,
         )
         session.agent = state.get("agent")
@@ -370,7 +316,7 @@ class Session:
         session.human = bool(state.get("human"))
         session.released = bool(state.get("released"))
         session.also = [list(pair) for pair in state.get("also", [])]
-        # Restart retention because saved timestamps may predate live connections.
+        # Give restored sessions a full retention period to reconnect.
         session.last_seen = time.time()
         session.frames = [Frame.restore(frame) for frame in state.get("frames", [])]
         session.marks = list(state.get("marks", []))
@@ -392,8 +338,8 @@ class Session:
     async def _setup(self, frames: list[dict[str, Any]] | None) -> None:
         """Install the session's Lua in the connected nvim.
 
-        With frames, nvim starts drawing them; without, it keeps whatever it
-        already draws, which is what an adopted nvim should do.
+        Send frames to a new nvim. Omit them for an adopted nvim so its current
+        display remains available for reconciliation.
         """
         assert self.rpc is not None
         self.rpc.on_notification = self._on_notification
@@ -404,8 +350,7 @@ class Session:
             "background": self.background,
             "text_limit": MARK_TEXT_LIMIT,
         }
-        # No notes means no argument at all: a nil positional would reach Lua
-        # as vim.NIL, which is not nil.
+        # Omit absent frames because msgpack nil becomes truthy `vim.NIL` in Lua.
         await self.rpc.lua(
             SESSION_INIT, options, *([frames] if frames is not None else [])
         )
@@ -413,10 +358,8 @@ class Session:
     async def wear_background(self, background: str) -> None:
         """Take the background an attaching terminal reported.
 
-        A session created with --light or --dark keeps that value: the flag is
-        the human's standing choice, and a terminal answering otherwise does
-        not undo it. What the terminal says is not saved either, because the
-        next terminal to attach may be a different one; it is asked again.
+        Preserve an explicit `--light` or `--dark` setting. Do not save detected
+        values because the next terminal may have a different background.
         """
         if self.background is not None or self.rpc is None:
             return
@@ -432,9 +375,8 @@ class Session:
     async def ensure(self, spawn: bool = True) -> None:
         """Bring the session's nvim back if it is gone.
 
-        `:q` in an attached UI kills the server outright, and the human has no
-        reason to know that ends the review. Without `spawn`, only an nvim
-        that is already running is taken.
+        `:q` kills the server, but the session review must survive it. With
+        `spawn=False`, adopt only an existing nvim.
         """
         async with self._lock:
             await self._ensure(spawn)
@@ -443,13 +385,11 @@ class Session:
         outcome = await self.editor.ensure(spawn)
         if outcome == "started":
             await self._setup(self._frames_for_lua())
-            # After a restart this is what puts the review back in front of
-            # the human. Nobody is attached yet, so there is no view to preserve.
+            # Restore the review with focus before any UI attaches.
             if self.frames:
                 await self._draw(focus=True, restoring=True)
         elif outcome == "adopted":
-            # nvim has been on its own: it may hold moved notes and questions
-            # asked while no broker was listening.
+            # Absorb positions and questions recorded while the broker was absent.
             await self._setup(None)
             assert self.rpc is not None
             self._absorb(await self.rpc.lua(SYNC))
@@ -467,12 +407,9 @@ class Session:
             {
                 "focus": focus,
                 "open": open_files,
-                # Every frame's files, not just the top one's: nothing is
-                # loaded yet, and a frame that draws into no buffer is gone
-                # from the screen while still in the record.
+                # A fresh nvim must load lower-frame files to render their notes.
                 "open_all": restoring,
-                # A question is marked until an agent acknowledges it, so nvim
-                # has to be told which are still waiting.
+                # Keep question signs until the broker records an acknowledgement.
                 "pending": [
                     mark["ask"]
                     for mark in self.marks
@@ -491,11 +428,9 @@ class Session:
     async def _exchange(self, action: Callable[[], Awaitable[Any]]) -> Any:
         """Run one exchange with nvim, starting it again if it has gone.
 
-        A session can die between two calls, and the failure surfaces only when
-        the next one is sent. The caller holds the lock: an operation that
-        changes the record has to hold it from before the change until after
-        the answer is built, or a second caller changes the record underneath
-        it and both are answered with the same result.
+        Retry once when nvim dies between calls. The caller holds the lock
+        across record changes and response construction so concurrent callers
+        cannot receive results for the same final state.
         """
         await self._ensure()
         try:
@@ -518,10 +453,9 @@ class Session:
         started for this call, startup draws the record, and this call then
         draws it again.
 
-        Held under the lock from the change to the answer. Two agents can
-        share a session -- two boxes in one tree do, deliberately -- and
-        changing the frames before taking it left both calls reporting the
-        same notes, with one caller's gone.
+        Hold the session lock from the record change through response creation.
+        Multiple clients may share a session, and releasing it earlier can make
+        both calls report the later state.
         """
         async with self._lock:
             return await self._show(locations, title, focus, frame)
@@ -555,22 +489,19 @@ class Session:
 
         async def run() -> Any:
             assert self.rpc is not None
-            # Agent edits reach disk without passing through the broker, so
-            # refresh before showing anything.
+            # Load agent edits from disk before drawing the review.
             await self.rpc.request("nvim_command", "checktime")
             return await self._draw(focus=focus, open_files=frame != "pop")
 
         result = await self._exchange(run)
-        # Nothing on screen and something worth seeing: the show already told
-        # us how many UIs nvim has, so this costs no extra round trip.
+        # Open a window only when the atomic show reports no attached UI.
         result["opened_ui"] = not result.get("uis") and self.editor.open_window()
         result["frame"] = top.letter if top else None
         result["popped"] = popped
         result["ids"] = (
             [note.id for note in top.notes] if top and frame != "pop" else []
         )
-        # The stack as this call left it. Read after the lock, it would be
-        # whatever the next caller has done since.
+        # Capture the stack before releasing the lock to a later caller.
         result["frames"] = [
             {"letter": f.letter, "title": f.title, "notes": len(f.notes)}
             for f in self.frames
@@ -643,8 +574,8 @@ class Session:
     def _absorb(self, sync: dict[str, Any]) -> bool:
         """Take what nvim reports into the record.
 
-        Positions are applied by note id, so a report about a note set that a
-        later show has already replaced changes nothing.
+        Apply positions by note ID so stale reports cannot move replacement
+        notes.
         """
         by_id = {note.id: note for note in self.notes}
         for position in sync.get("positions") or []:
@@ -684,15 +615,9 @@ class Session:
     async def attached(self, timeout: float = 30.0) -> bool:
         """Query attached UIs without starting nvim.
 
-        Return False for a dead editor. Propagate other NvimError failures so
-        the collector preserves editors that are too busy to answer.
-
-        The deadline covers the wait for the session lock as well as the
-        request. The collector runs on the broker's own loop and budgets for
-        one probe; a session whose lock is held by a call that is itself
-        waiting on nvim would otherwise hold that loop for as long as the call
-        takes. Failing to reach nvim in time says the same thing either way --
-        busy, not gone -- so it reads as one.
+        Return False for a dead editor. Report a busy editor as an error so the
+        collector preserves it. Apply one deadline to the lock and RPC request
+        so a call waiting on nvim cannot also block the collector indefinitely.
         """
         try:
             async with asyncio.timeout(timeout):
@@ -711,8 +636,7 @@ class Session:
     async def _hand_over(self) -> None:
         """Take a final sync before dropping the connection.
 
-        Once the connection closes, nvim's own hand-over on exit has nobody
-        to give it to.
+        nvim cannot deliver its exit sync after the broker disconnects.
         """
         if self.rpc is not None:
             with contextlib.suppress(Exception):

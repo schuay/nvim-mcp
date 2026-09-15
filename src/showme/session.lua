@@ -1,13 +1,10 @@
 -- Copyright 2026 The showme developers
 -- SPDX-License-Identifier: MIT
 
--- The session's half inside nvim. Run once by the broker after connecting.
+-- Render broker-owned session state inside nvim.
 --
--- The broker holds the record of what a session shows and what the human has
--- handed back; this side draws it and reports what only nvim can know: where a
--- note's anchor has moved to as the human edits, and what the human asked.
--- Client values arrive as arguments to nvim_exec_lua calls, never inside the
--- code.
+-- Report anchor positions and human questions to the broker. Pass client values
+-- as nvim_exec_lua arguments so they never become executable Lua.
 
 local opts, frames = ...
 local background = opts.background
@@ -15,23 +12,17 @@ local group = vim.api.nvim_create_augroup('showme', { clear = true })
 
 _G.ShowMe = _G.ShowMe or {}
 local M = _G.ShowMe
---- The broker's channel. Human events go straight to it while it is open.
+--- Broker channel used to deliver human events immediately.
 M.chan = opts.chan
 M.text_limit = opts.text_limit
---- The frames the broker last sent, bottom first, cached so a buffer read
---- again can be redrawn without a round trip. Note lines follow the anchors.
---- A broker that adopts a running nvim sends none and takes what is here.
+--- Cached broker frames, bottom first. Keep these across adoption so buffers
+--- can redraw without a round trip.
 M.frames = frames or M.frames or {}
---- Anchor extmark per note id, in the buffer holding the note. Created when
---- the buffer is first drawn and never cleared by a redraw, so it is the one
---- thing that keeps tracking the human's edits.
+--- Persistent anchor extmark per note ID, used to follow human edits.
 M.anchors = M.anchors or {}
---- Marks the broker has not received: only those made while its channel was
---- closed. They go out with the next sync.
+--- Marks created while the broker channel was unavailable, sent on next sync.
 M.pending = M.pending or {}
---- The sign extmark per question, by a number this side counts. A question
---- keeps its sign until the broker says an agent acknowledged it, so the
---- human writing a batch of replies can see which are still waiting.
+--- Sign extmark per question. Keep it until the broker reports acknowledgement.
 M.asks = M.asks or {}
 M.ask_seq = M.ask_seq or 0
 M.ns = vim.api.nvim_create_namespace('showme-show')
@@ -40,22 +31,17 @@ M.ask_ns = vim.api.nvim_create_namespace('showme-ask')
 
 
 local function options()
-  -- The session is headless, so it never queried the terminal. Without this it
-  -- renders the dark palette into a light terminal.
+  -- Headless nvim needs the supplied background to choose the correct palette.
   if background ~= nil and vim.o.background ~= background then
     vim.o.background = background
   end
-  -- The UI attaches before it knows the server's colour depth. Setting this
-  -- sends it a termguicolors option event, which switches it to truecolor.
+  -- Notify an attaching UI to use truecolor before it detects server settings.
   vim.o.termguicolors = true
-  -- Tabs hold files, the quickfix list holds positions; 'switchbuf' is what
-  -- makes :cnext move between tabs instead of displacing the human's window.
+  -- Make quickfix navigation switch tabs instead of replacing a window's buffer.
   vim.o.switchbuf = 'usetab,newtab'
-  -- The human opens these same files in their everyday nvim; a session
-  -- swapfile would meet them with an E325 prompt.
+  -- Avoid swapfile conflicts with the human's other nvim instance.
   vim.o.swapfile = false
-  -- The agent chooses which files open here. A modeline or project-local
-  -- config in one of them would run on the host at a moment the agent picks.
+  -- Agent-selected files must not run modelines or project-local host code.
   vim.o.modeline = false
   vim.o.exrc = false
 end
@@ -86,29 +72,21 @@ local function contrast(a, b)
   return (high + 0.05) / (low + 0.05)
 end
 
--- A note must not read as code, and a foreground colour does not carry that:
--- a colourscheme's diagnostic blue against its comment green is a small
--- difference, and both sit on the same background as the code. Give the note
--- its own band instead, mixed from the diagnostic colour and the editor
--- background so it follows whatever colourscheme the human runs.
+-- Give notes a distinct background band derived from the active colourscheme.
+-- A foreground-only change can be indistinguishable from code highlighting.
 --
--- The derived groups are force-set so a colourscheme change re-colours them,
--- while the groups the extmarks name only link to them by default, which keeps
--- a human's own ShowMeNote or ShowMeShow across colourscheme changes.
+-- Replace derived groups after colourscheme changes. Link public groups only by
+-- default so human overrides survive.
 local function styles()
   local info = vim.api.nvim_get_hl(0, { name = 'DiagnosticInfo', link = false })
   local normal = vim.api.nvim_get_hl(0, { name = 'Normal', link = false })
   local note = { italic = true }
   if info.fg and normal.bg and normal.fg then
-    -- Two constraints, not one: the band has to stand off the code background,
-    -- and its own text has to stay readable on it. Mixing in ever more
-    -- diagnostic colour satisfies the first and destroys the second, because a
-    -- saturated mid-tone band sits far from the editor foreground and its
-    -- background alike. So take the most separated band whose text still reads.
+    -- Choose the band farthest from the editor background while retaining
+    -- readable text contrast.
     --
-    -- The readability bar follows the colourscheme rather than a fixed 4.5:1.
-    -- Some schemes set their own body text near 4.5, and holding the band to a
-    -- higher standard than the code around it would reject every candidate.
+    -- Cap the threshold at 90% of the colourscheme's body-text contrast because
+    -- some schemes already render body text near 4.5:1.
     local readable = math.min(4.5, contrast(normal.fg, normal.bg) * 0.9)
     local best, fallback
     for _, alpha in ipairs({ 0.12, 0.2, 0.3, 0.45, 0.6, 0.75, 0.9 }) do
@@ -122,8 +100,7 @@ local function styles()
       end
       if not fallback or candidate.read > fallback.read then fallback = candidate end
     end
-    -- Always produce a band. A note that falls back to coloured text is the
-    -- thing this whole derivation exists to avoid.
+    -- Always use the most readable candidate when none meets the threshold.
     best = best or fallback
     note.bg, note.fg = best.bg, best.fg
   else
@@ -137,10 +114,8 @@ local function styles()
   vim.api.nvim_set_hl(0, 'ShowMeAsk', { link = 'ShowMeAskDefault', default = true })
 end
 
--- Virtual lines ignore 'wrap' and this nvim offers no wrapping overflow mode,
--- so a long note line is cut off at the window edge with nothing to show it
--- continued. Break it here instead, against the width of a window showing the
--- buffer; a resize redraws, because the width it was broken against is gone.
+-- Virtual lines do not wrap or mark overflow. Wrap to the displaying window's
+-- width and redraw after resize.
 local function textwidth(buf)
   for _, win in ipairs(vim.api.nvim_list_wins()) do
     if vim.api.nvim_win_get_buf(win) == buf then
@@ -151,23 +126,16 @@ local function textwidth(buf)
   return math.max(40, vim.o.columns - 4)
 end
 
--- Cut to a byte length without splitting a character. A half character is
--- not UTF-8, and msgpack strings are: one used to break the broker's decoder,
--- and the broker used to answer a broken connection by replacing the editor.
+-- Cut to a byte length without creating invalid UTF-8 for msgpack.
 local function cut(text, bytes)
   if bytes < 1 then return '' end
   return text:sub(1, bytes + vim.str_utf_start(text, bytes + 1))
 end
 
 
--- A note is drawn with the line breaks it was written with: reflowing them
--- into a paragraph is what turns a snippet back into prose, and a snippet is
--- what most notes point at. Only a line wider than the window is broken.
+-- Preserve explicit line breaks and wrap only lines wider than the window.
 local function wrap(text, width, prefix)
-  -- The prefix, the note's id, leads the first line; later lines hang under
-  -- the text so the id stays the one thing in its column. A line broken for
-  -- width hangs again under its own indent, so the break reads as one line
-  -- rather than as the next statement.
+  -- Hang continuations under the text and preserve indentation on wrapped lines.
   local lines = {}
   local first, hang = '  ' .. prefix, string.rep(' ', 2 + #prefix)
   for line in vim.gsplit(text, '\n', { plain = true }) do
@@ -180,9 +148,7 @@ local function wrap(text, width, prefix)
         lines[#lines + 1] = indent .. body
         body = ''
       else
-        -- Break at the last space when the line has one late enough to leave
-        -- a full line behind. A snippet usually has none, and breaking it
-        -- mid-token is honest where re-joining its words is not.
+        -- Break late whitespace when available; never reflow snippet words.
         local head = cut(body, room)
         local at = head:match('^.*()%s')
         if not at or at < room / 2 then at = #head + 1 end
@@ -196,12 +162,8 @@ local function wrap(text, width, prefix)
 end
 
 
--- A quickfix entry gets one screen line, which nvim neither wraps nor marks as
--- cut, so a long note would run off the right edge. Clip it to what the entry
--- leaves after nvim's own 'file|line col n note| ' prefix; the band above the
--- code carries the whole text. A note's line breaks need no work here: nvim
--- draws a break and the indentation after it as a single space, which only
--- ever makes the entry shorter than the bytes clipped for it.
+-- Quickfix entries neither wrap nor mark overflow. Clip to the space after
+-- nvim's prefix; the virtual-line band retains the full note.
 local function clip(text, room)
   if #text <= room then return text end
   return (cut(text, math.max(1, room - 3)):gsub('%s+$', '')) .. '...'
@@ -216,7 +178,6 @@ local function loaded_buffers()
   return out
 end
 
---- Every live note with its frame, bottom frame first.
 local function notes()
   local out = {}
   for _, frame in ipairs(M.frames) do
@@ -225,7 +186,6 @@ local function notes()
   return out
 end
 
---- Where a note's anchor is now, or nil if its buffer is not loaded.
 local function anchored(note)
   local anchor = M.anchors[note.id]
   if not anchor or not vim.api.nvim_buf_is_loaded(anchor.buf) then return nil end
@@ -237,7 +197,6 @@ local function anchored(note)
   return line, math.max(line, (at[3].end_row or at[1]) + 1)
 end
 
---- Bring the cached lines up to date with the anchors, for one buffer or all.
 local function refresh(buf)
   for _, entry in ipairs(notes()) do
     local note = entry.note
@@ -262,21 +221,17 @@ local function anchor(buf, note, first, final)
   }
 end
 
---- Draw the notes belonging to one buffer.
----
---- Called again whenever a buffer is read, because unloading a buffer drops
---- every extmark in it and the human closing a file must not lose the review.
---- Decorations are rebuilt from scratch; anchors are kept, and read first, so
---- a redraw lands where the human's edits have moved the note.
+--- Draw notes for one buffer. Buffer unload drops extmarks, so redraw after each
+--- load. Refresh and retain anchors before rebuilding decorations to preserve
+--- positions moved by human edits.
 function M.render(buf)
   if not vim.api.nvim_buf_is_loaded(buf) then return end
   local name = vim.api.nvim_buf_get_name(buf)
   refresh(buf)
   vim.api.nvim_buf_clear_namespace(buf, M.ns, 0, -1)
   local last = vim.api.nvim_buf_line_count(buf)
-  -- All bands above one line go in a single extmark, bottom frame first, so
-  -- an answer sits under the question it answers. nvim draws several marks
-  -- at one position in an order it does not promise.
+  -- Combine bands at one line because nvim does not define extmark draw order.
+  -- Keep bottom frames first so answers appear below their questions.
   local bands, rows = {}, {}
   for _, entry in ipairs(notes()) do
     local note = entry.note
@@ -300,8 +255,7 @@ function M.render(buf)
           rows[#rows + 1] = first
         end
         for _, text in ipairs(wrap(note.text, textwidth(buf), note.id .. '  ')) do
-          -- An empty final chunk extends the highlight to the end of the screen
-          -- line, so the note reads as a band rather than coloured text.
+          -- An empty final chunk extends the background to the screen edge.
           table.insert(bands[first], { { text, 'ShowMeNote' }, { '', 'ShowMeNote' } })
         end
       end
@@ -318,7 +272,6 @@ function M.render_all()
   for _, buf in ipairs(loaded_buffers()) do M.render(buf) end
 end
 
---- The current line of every note, by id.
 function M.positions()
   refresh()
   local out = {}
@@ -329,22 +282,20 @@ function M.positions()
   return out
 end
 
---- The ids of every live note, bottom frame first.
 function M.ids()
   local out = {}
   for _, entry in ipairs(notes()) do out[#out + 1] = entry.note.id end
   return out
 end
 
---- Everything the broker's record is missing. Returned with every call and
---- handed over on exit.
+--- Return nvim-owned state and clear marks queued for the broker.
 function M.sync()
   local marks = M.pending
   M.pending = {}
   return { positions = M.positions(), marks = marks }
 end
 
---- The topmost note under a line, so a question lands on the newest thread.
+--- Select the newest note covering a line for question threading.
 local function note_at(buf, line)
   local name = vim.api.nvim_buf_get_name(buf)
   local found = nil
@@ -372,29 +323,21 @@ local function scratch(win)
     and vim.api.nvim_buf_get_lines(buf, 0, 1, true)[1] == ''
 end
 
---- Draw the broker's frames. The top frame's files are opened and its
---- positions fill the quickfix list; lower frames render wherever their
---- files are already loaded, plus whatever a restart has to put back.
 local function open_buffer(file, buf, seen, opened, focus)
   vim.fn.bufload(buf)
-  -- bufadd leaves a buffer unlisted, which hides it from :ls and from
-  -- anything asking nvim what is open.
+  -- `bufadd` creates an unlisted buffer, so list it for tab queries and `:ls`.
   vim.bo[buf].buflisted = true
   if seen[file] then return end
   seen[file] = true
   opened[#opened + 1] = file
   if displayed(buf) then return end
-  -- An empty window is taken over only when the human is being brought here
-  -- anyway. With focus off, replacing the buffer in front of them is a change
-  -- they did not ask for, and restoring the tabpage afterwards does not undo it.
+  -- Reuse an empty window only for a focused show. Background redraws must not
+  -- replace the buffer in front of the human.
   if not (focus and scratch(vim.api.nvim_get_current_win())) then vim.cmd('tabnew') end
   vim.api.nvim_win_set_buf(0, buf)
 end
 
---- Drop the sign on questions an agent has answered. A question is marked
---- until it is acknowledged rather than until it is delivered: the human
---- writes a batch and hands it over, and the ones still waiting have to look
---- different from the ones that came back.
+--- Remove signs for acknowledged questions so pending replies remain visible.
 local function settle_asks(pending)
   if pending == nil then return end
   local waiting = {}
@@ -409,10 +352,8 @@ end
 
 function M.show(new_frames, show_opts)
   local previous = vim.api.nvim_get_current_tabpage()
-  -- Where the human's edits have left the notes. The anchors are the only
-  -- record of that and this is the last moment to read them: a note that
-  -- survives the change keeps its anchor, and clearing the lot here used to
-  -- put it back on whichever line the broker last saw it on.
+  -- Read anchors before replacing frames so retained notes keep positions moved
+  -- by human edits.
   local live = {}
   for _, at in ipairs(M.positions()) do live[at.id] = at end
   for _, buf in ipairs(loaded_buffers()) do
@@ -436,8 +377,7 @@ function M.show(new_frames, show_opts)
   local top = new_frames[#new_frames]
   local items, opened, seen = {}, {}, {}
   for _, note in ipairs(top and top.notes or {}) do
-    -- bufadd takes the name literally. :edit and nvim_cmd would expand
-    -- backticks in it and run a shell.
+    -- `bufadd` treats names literally; Ex commands expand backticks as shell code.
     local buf = vim.fn.bufadd(note.file)
     if show_opts.open then
       open_buffer(note.file, buf, seen, opened, show_opts.focus)
@@ -445,8 +385,7 @@ function M.show(new_frames, show_opts)
     if vim.api.nvim_buf_is_loaded(buf) then
       local lnum = math.max(1, math.min(note.line or 1, vim.api.nvim_buf_line_count(buf)))
       local label = note.id .. '  '
-      -- nvim draws 'name|lnum col 1 note| ' ahead of the entry's own text:
-      -- the displayed name and the line, plus 14 fixed columns for the rest.
+      -- Reserve space for nvim's `name|lnum col 1 note| ` prefix.
       local name = vim.fn.fnamemodify(vim.api.nvim_buf_get_name(buf), ':.')
       local room = vim.o.columns - #name - #tostring(lnum) - 14 - #label
       items[#items + 1] = {
@@ -459,9 +398,7 @@ function M.show(new_frames, show_opts)
     end
   end
 
-  -- A restart has nothing loaded, so a lower frame would draw into no buffer
-  -- at all: still in the record, gone from the screen. Its files are opened
-  -- without focus, behind the frame the human is meant to be reading.
+  -- A fresh nvim must load lower-frame files or their recorded notes stay hidden.
   if show_opts.open_all then
     for _, entry in ipairs(notes()) do
       local file = entry.note.file
@@ -486,9 +423,7 @@ local function buffer_state(buf)
   return {
     file = vim.api.nvim_buf_get_name(buf),
     modified = vim.bo[buf].modified,
-    -- Only a real file buffer may be read. A terminal buffer holds the human's
-    -- shell scrollback, and the browsers keep their own listings in buffers
-    -- whose names are not paths at all.
+    -- Exclude terminals and browser buffers whose contents are not file text.
     readable = vim.bo[buf].buftype == '' and vim.api.nvim_buf_is_loaded(buf),
     visible = displayed(buf),
     lines = vim.api.nvim_buf_line_count(buf),
@@ -530,9 +465,8 @@ function M.read(what, read_opts)
   return result
 end
 
--- nvim listens on its socket before it has finished starting, so this runs
--- while highlight groups are still undefined and before the human's config has
--- had its say about these options. Repeat both once startup is done.
+-- The socket accepts calls before startup and user configuration finish. Apply
+-- options and styles now, then reapply them at VimEnter.
 options()
 styles()
 vim.api.nvim_create_autocmd('VimEnter', {
@@ -544,30 +478,24 @@ vim.api.nvim_create_autocmd('VimEnter', {
   end,
 })
 vim.api.nvim_create_autocmd('ColorScheme', { group = group, callback = styles })
--- Notes were broken against the width of the window they were drawn in, and
--- nothing redraws them on its own: a narrowed window would run them off its
--- edge until the next call.
+-- Rewrap virtual lines after their window width changes.
 vim.api.nvim_create_autocmd('VimResized', { group = group, callback = M.render_all })
 vim.api.nvim_create_autocmd({ 'BufReadPost', 'BufWinEnter' }, {
   group = group,
   callback = function(ev) M.render(ev.buf) end,
 })
--- The anchors go with the buffer. Take their last positions into the cache so
--- the notes come back on the right lines when it is read again.
+-- Cache anchor positions before buffer unload discards the extmarks.
 vim.api.nvim_create_autocmd('BufUnload', {
   group = group,
   callback = function(ev) refresh(ev.buf) end,
 })
--- Hand over what the broker has not seen before this nvim is gone. A request
--- rather than a notification, so exit waits for the broker to take it; if the
--- broker is away there is nobody to wait for.
+-- Use a request for the final sync so exit waits for the broker to receive it.
 vim.api.nvim_create_autocmd('VimLeavePre', {
   group = group,
   callback = function() pcall(vim.rpcrequest, M.chan, 'showme', 'sync', M.sync()) end,
 })
 
--- Answer the file-changed prompt ourselves. Left to nvim it blocks the RPC
--- behind a dialog when a UI is attached and 'autoread' is off.
+-- Resolve file-change prompts that would otherwise block RPC behind a UI dialog.
 vim.api.nvim_create_autocmd('FileChangedShell', {
   group = group,
   callback = function(ev)
@@ -575,8 +503,7 @@ vim.api.nvim_create_autocmd('FileChangedShell', {
   end,
 })
 
--- Frames are the broker's to change. The human's pop goes to it as a request
--- and comes back as a redraw; with the broker away there is nothing to change.
+-- Ask the broker to mutate its frame record, then let its redraw update nvim.
 local function request_pop(letter)
   if not pcall(vim.rpcnotify, M.chan, 'showme', 'pop', letter) then
     vim.notify('showme: broker away, cannot pop')
@@ -587,10 +514,8 @@ vim.api.nvim_create_user_command('AgentPop', function() request_pop(nil) end,
 vim.api.nvim_create_user_command('AgentDrop', function(o) request_pop(o.args) end,
   { nargs = 1, desc = 'Drop the named frame of agent notes' })
 
--- Walking the notes, which is how the quickfix list is read. The top frame is
--- a handful of entries, so its end is a place to wrap rather than the error
--- :cnext gives there. Ctrl-Alt because terminals keep Ctrl-Shift-PageUp for
--- their own scrollback.
+-- Wrap quickfix navigation at frame boundaries. Use Ctrl-Alt because terminals
+-- commonly reserve Ctrl-Shift-PageUp for scrollback.
 local function walk(step, wrap)
   return function()
     if vim.fn.getqflist({ size = 0 }).size == 0 then
@@ -605,12 +530,11 @@ vim.keymap.set('n', '<C-M-PageDown>', walk('cnext', 'cfirst'),
 vim.keymap.set('n', '<C-M-PageUp>', walk('cprevious', 'clast'),
   { desc = 'Jump to the previous agent note' })
 
--- The human's half of the conversation. `:Ask` hands a range to the agent.
+-- `:Ask` sends the selected range and question to the agent.
 vim.api.nvim_create_user_command('Ask', function(o)
   local buf = vim.api.nvim_get_current_buf()
   refresh(buf)
-  -- The text as the human saw it. The file may change before the agent
-  -- reads it, and an agent in a sandbox may not be able to read it at all.
+  -- Capture displayed text because disk may differ or be outside sandbox access.
   local text = table.concat(vim.api.nvim_buf_get_lines(buf, o.line1 - 1, o.line2, false), '\n')
   local truncated = #text > M.text_limit
   if truncated then text = cut(text, M.text_limit) end
@@ -626,8 +550,7 @@ vim.api.nvim_create_user_command('Ask', function(o)
     text = text,
     truncated = truncated,
   }
-  -- Straight to the broker while its channel is open, so the question is
-  -- recorded before this nvim can be quit. Otherwise held for the next sync.
+  -- Deliver immediately when possible; otherwise retain the mark for next sync.
   local delivered = pcall(vim.rpcnotify, M.chan, 'showme', 'ask', mark)
   if not delivered then M.pending[#M.pending + 1] = mark end
   M.asks[M.ask_seq] = {
@@ -641,10 +564,7 @@ vim.api.nvim_create_user_command('Ask', function(o)
              or 'showme: broker away, question kept for it')
 end, { range = true, nargs = '*', desc = 'Hand the selected lines to the agent' })
 
--- The other direction, for the chat rather than the session: `:Ref` puts a
--- reference to the current line or range where it can be pasted, spelled the
--- way an agent names one -- relative to the session root, which is this
--- nvim's cwd, and 1-based and inclusive like `show`.
+-- `:Ref` copies a root-relative, 1-based, inclusive reference for chat.
 vim.api.nvim_create_user_command('Ref', function(o)
   local name = vim.api.nvim_buf_get_name(0)
   if name == '' then
@@ -654,9 +574,7 @@ vim.api.nvim_create_user_command('Ref', function(o)
   local path = vim.fn.fnamemodify(name, ':.')
   local ref = o.line1 == o.line2 and string.format('%s:%d', path, o.line1)
     or string.format('%s:%d-%d', path, o.line1, o.line2)
-  -- The clipboard register rather than a clipboard tool by name: nvim already
-  -- picks the one that fits the session it was started in, and a session's
-  -- nvim inherits the environment of the shell that asked for it.
+  -- Let nvim choose the clipboard provider for the saved human environment.
   if vim.fn.has('clipboard') == 0 then
     vim.notify('showme: no clipboard provider; ' .. ref)
     return

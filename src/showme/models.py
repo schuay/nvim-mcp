@@ -1,16 +1,11 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""The tool contract: what a client may send and what it gets back.
+"""Define and validate the MCP tool contract.
 
-The MCP schemas are generated from these models and arguments are validated
-against them before anything reaches nvim, so the schema the model reads and
-the check the broker makes cannot disagree. The SDK's server validates the
-JSON-RPC envelope only, not tool arguments.
-
-Strict mode, so a string where an integer belongs is an error rather than a
-coercion, and no unknown fields, so a misspelled option is caught instead of
-silently ignored.
+Generate schemas and validate arguments from the same models. The SDK validates
+only the JSON-RPC envelope. Strict mode rejects type coercion, and forbidden
+extra fields expose misspelled options.
 """
 
 from __future__ import annotations
@@ -20,8 +15,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 from pydantic.json_schema import GenerateJsonSchema
 
-#: A review the human has to walk, not a dump. Beyond this the quickfix list
-#: stops being something anyone reads to the end.
+#: Keep the quickfix list short enough to review from start to finish.
 LOCATION_LIMIT = 50
 
 
@@ -30,8 +24,7 @@ class Request(BaseModel):
 
 
 class Result(BaseModel):
-    # Results are built here, not parsed, so unknown keys from nvim's tables
-    # are dropped rather than rejected.
+    # Results are constructed locally, so discard extra keys from nvim tables.
     model_config = ConfigDict(extra="ignore")
 
 
@@ -68,8 +61,7 @@ class LocationSpec(Request):
 
     @model_validator(mode="after")
     def _range_runs_forward(self) -> LocationSpec:
-        # nvim would collapse a backwards range to its first line, which looks
-        # like a highlight that landed rather than an argument to fix.
+        # nvim silently collapses a backward range, hiding the invalid argument.
         if self.end_line is not None and self.end_line < self.line:
             raise ValueError(f"end_line {self.end_line} is before line {self.line}")
         return self
@@ -117,11 +109,7 @@ class ReadRequest(Request):
 
 
 class Envelope(Result):
-    """What every result carries.
-
-    An agent learns about a waiting question from any call it happens to make,
-    so noticing one costs nothing extra.
-    """
+    """Include pending-question state in every tool result."""
 
     session: str
     root: str = Field(
@@ -242,8 +230,7 @@ class Range(Buffer):
 
 class NotOpen(Result):
     open: Literal[False]
-    #: Resolved, so it reads the same as the path an open buffer comes back
-    #: with. The two used to differ by whatever the caller happened to send.
+    #: Match the resolved path returned for open buffers.
     file: str
     hint: str = Field(
         default="not open in this session; show it first, or read it from disk",
@@ -273,8 +260,7 @@ class ReadResult(Envelope):
 
 
 class _Schema(GenerateJsonSchema):
-    # Tool schemas are resident in every request the model makes. A title per
-    # property only repeats the property name.
+    # Property titles repeat field names and increase every model request.
     def field_title_should_be_set(self, schema: Any) -> bool:
         return False
 

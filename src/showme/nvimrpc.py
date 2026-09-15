@@ -1,12 +1,11 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Speak msgpack-RPC to a running nvim over a UNIX socket.
+"""Speak msgpack-RPC to nvim over a UNIX socket.
 
-nvim answers requests in reverse order of arrival, so responses are matched by
-message id rather than by position. Notifications and requests from nvim arrive
-unsolicited on the same connection and go to callbacks; a request is answered
-with whatever the callback returns.
+Match responses by message ID because nvim may answer requests out of order.
+Dispatch unsolicited notifications and requests from the same connection to
+callbacks.
 """
 
 from __future__ import annotations
@@ -27,8 +26,7 @@ REQUEST = 0
 RESPONSE = 1
 NOTIFICATION = 2
 
-#: A wedged nvim must not wedge the client waiting on it. Generous, because a
-#: cold buffer load on a large file is legitimately slow.
+#: Bound a wedged nvim while allowing slow cold loads of large files.
 TIMEOUT = 30.0
 
 
@@ -39,9 +37,8 @@ class NvimError(RuntimeError):
 class NvimGone(NvimError):
     """The connection to nvim is closed or broke while sending.
 
-    Distinct from an error nvim itself reported, because a caller can recover
-    from this one by starting nvim again; retrying the other would just repeat
-    a failure.
+    Callers may recover from a lost connection by restarting nvim. An error
+    reported by nvim would recur after a restart.
     """
 
 
@@ -56,8 +53,7 @@ class NvimRPC:
         self._closed = False
         self._task = asyncio.create_task(self._read_loop())
         self.on_notification: Callable[[str, list[Any]], None] | None = None
-        #: Answers a request nvim makes of us. Runs on the read loop, so it
-        #: must not wait on anything that needs the loop.
+        #: Runs on the read loop and must not wait for work that needs that loop.
         self.on_request: Callable[[str, list[Any]], Any] | None = None
 
     @property
@@ -70,8 +66,7 @@ class NvimRPC:
         return cls(reader, writer)
 
     async def request(self, method: str, *params: Any, timeout: float = TIMEOUT) -> Any:
-        # Once the read loop is gone nothing will ever complete a new future, so
-        # a request registered after that would wait forever.
+        # The closed read loop cannot complete a newly registered future.
         if self._closed:
             raise NvimGone("nvim connection is closed")
         msgid = next(self._ids)
@@ -81,9 +76,8 @@ class NvimRPC:
             self._writer.write(msgpack.packb([REQUEST, msgid, method, list(params)]))
             await self._writer.drain()
         except OSError as e:
-            # A failed write means this connection is finished. Say so now, or
-            # a caller that reconnects on NvimGone will find it still looking
-            # alive and retry down the same dead socket.
+            # Mark the connection closed before callers handle NvimGone, or a
+            # retry will reuse the same dead socket.
             self._closed = True
             self._pending.pop(msgid, None)
             raise NvimGone(f"nvim connection broke: {e}") from e
@@ -92,16 +86,14 @@ class NvimRPC:
         except TimeoutError:
             raise NvimError(f"nvim did not answer {method} within {timeout}s") from None
         finally:
-            # Also on cancellation: a caller under an outer deadline is dropped
-            # here without ever timing out, and its entry would sit in the map
-            # until the connection ends.
+            # An outer cancellation bypasses this request's timeout, so always
+            # remove its pending entry.
             self._pending.pop(msgid, None)
 
     async def notify(self, method: str, *params: Any) -> None:
         """Send a call that expects no answer.
 
-        Needed for anything that makes nvim exit: a request would wait forever
-        for a response the dying process never sends.
+        Use this for calls that make nvim exit, because it cannot answer them.
         """
         self._writer.write(msgpack.packb([NOTIFICATION, method, list(params)]))
         await self._writer.drain()
@@ -109,10 +101,9 @@ class NvimRPC:
     async def lua(self, code: str, *args: Any) -> Any:
         """Run broker-owned Lua with client values passed as arguments.
 
-        Client values must never be formatted into `code`. nvim expands
-        backticks in a path given to an Ex command, including through
-        `nvim_cmd`'s structured arguments, so a filename the agent controls
-        would run a shell.
+        Never format client values into `code`. nvim expands backticks in Ex
+        command paths, including `nvim_cmd` arguments, which could run shell
+        commands from an agent-controlled filename.
         """
         return await self.request("nvim_exec_lua", code, [lua_value(a) for a in args])
 
@@ -124,9 +115,8 @@ class NvimRPC:
             await self._writer.wait_closed()
 
     async def _read_loop(self) -> None:
-        # A buffer can hold bytes that are not UTF-8, from a latin-1 file or
-        # a half-finished edit, and they reach here in a mark or a range. They
-        # are the human's content to lose, not the connection's.
+        # Preserve the connection when marks or ranges contain non-UTF-8 bytes
+        # from a file or unfinished edit.
         unpacker = msgpack.Unpacker(raw=False, unicode_errors="replace")
         try:
             while chunk := await self._reader.read(65536):
@@ -173,9 +163,8 @@ class NvimRPC:
 def lua_value(value: Any) -> Any:
     """Prepare a Python value for a Lua argument.
 
-    An absent optional field is left out rather than sent as null: nvim decodes
-    msgpack NIL as vim.NIL, which is truthy in Lua, so a default written as
-    `opts.x or 1` would never apply.
+    Omit absent optional fields. nvim decodes msgpack NIL as truthy `vim.NIL`,
+    which prevents Lua defaults such as `opts.x or 1` from applying.
     """
     if isinstance(value, dict):
         return {k: lua_value(v) for k, v in value.items() if v is not None}

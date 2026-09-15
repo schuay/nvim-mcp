@@ -1,19 +1,16 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""`showme`: create sessions, attach a terminal to one, and inspect them.
+"""Create, attach, and inspect showme sessions.
 
-Sessions are recorded here rather than by a client, because the root a
-launcher clamps an agent to has to come from the human. Which session an agent
-ends up on is not decided here: a launcher cannot know the conversation it is
-about to start, so it prepares one per launch and the broker settles it when
-the client says who it is.
+The human's launcher chooses the session root and prepares one session per
+launch. The broker assigns the session to a conversation when the client
+identifies itself. Host clients request an unrestricted key through the private
+admin socket.
 
-This is also where a client on the host takes the key that reads outside that
-root: it asks over the admin socket, and being able to reach it is the proof.
-This shell's environment goes along, so the session's nvim finds the same
-language servers and display the human's everyday one does; the broker that
-spawns it was started from some other shell.
+Pass a restricted copy of this shell's environment to the session so nvim can
+find the human's language servers, terminal, and display even when another
+shell started the broker.
 """
 
 from __future__ import annotations
@@ -61,8 +58,7 @@ def _ensure_broker(timeout: float = 10.0) -> None:
         pass
     else:
         return
-    # start_new_session detaches the broker from this terminal, so it survives
-    # the shell that started it.
+    # Give the broker its own session so it survives this shell.
     with paths.broker_log().open("ab") as log:
         subprocess.Popen(
             [sys.executable, "-m", "showme.broker"],
@@ -87,8 +83,7 @@ def cmd_new(args: argparse.Namespace) -> int:
     reply = _ask(
         {
             "cmd": "new",
-            # Resolved here: the broker's cwd is whichever shell first started
-            # it, and a relative root would be taken against that.
+            # Resolve against this shell because the broker has a different cwd.
             "root": str(Path(args.root).expanduser().resolve()),
             "clean": args.clean,
             "background": args.background or os.environ.get("SHOWME_BACKGROUND"),
@@ -103,12 +98,8 @@ def cmd_new(args: argparse.Namespace) -> int:
     return 0
 
 
-#: What a session's nvim is given of the shell that asked for it. The whole
-#: environment used to go, and it is written to the state file with the
-#: session: an interactive shell carries tokens that have no business being
-#: there. These are what an editor needs to look and behave like the human's
-#: own -- where its tools are, what its terminal is, which display to open a
-#: window on -- plus the prefixes a session legitimately reads.
+#: Environment needed for nvim tools, display, and terminal integration. The
+#: session state persists these values, so exclude unrelated secrets.
 ENV_KEEP = frozenset(
     {
         "HOME",
@@ -164,20 +155,16 @@ def cmd_ensure(args: argparse.Namespace) -> int:
     return 0
 
 
-#: Box directories left by a launcher that died before it could clean up. The
-#: key inside one names a session that is probably gone, and nothing reads a
-#: stale directory, so age is the only signal worth acting on.
+#: Remove abandoned sandbox key directories after this age.
 BOX_MAX_AGE = 24 * 60 * 60
 
 
 def cmd_box(args: argparse.Namespace) -> int:
     """Prepare one sandbox launch and print the bind spec that carries it.
 
-    The session comes first, because the root is the human's to choose and a
-    launcher knows it: the directory the human started the agent in. The key
-    goes in a directory of its own, which the caller binds read-only into that
-    box and no other, so the agent inside never handles a key and cannot name
-    a session it was not given.
+    Create the session before the sandbox so the human's launch directory sets
+    its root. Bind a private key directory read-only into this sandbox, which
+    prevents the agent from reading keys for other sessions.
     """
     reply = _session_for(args, "ensure")
     _sweep_boxes()
@@ -188,12 +175,11 @@ def cmd_box(args: argparse.Namespace) -> int:
     key.touch(mode=0o600)
     key.write_text(reply["key"])
     spec = paths.box_dir() / f"{token}.toml"
-    # Only the key directory. Everything else a box needs is in the specs the
-    # caller already passes, and an entry here would apply to one launch.
+    # Keep launch-specific state limited to this key directory.
     spec.write_text(f'ro = [\n    "{directory}",\n]\n')
-    # stdout is the one thing a launcher consumes; the rest is for the human.
+    # Reserve stdout for the bind specification consumed by the launcher.
     print(spec)
-    # Resume may select a different session id; attach by root instead.
+    # Resume may select another session ID, so print a root-based attach command.
     print(
         f"showme: session for {reply['root']}\n"
         f"showme: attach with:  showme {reply['root']}",
@@ -219,7 +205,6 @@ def cmd_ls(_args: argparse.Namespace) -> int:
         return 0
     for session in sessions:
         state = "attached" if session["attached"] else "detached"
-        # Frame summaries distinguish conversations in the same tree.
         showing = session.get("showing") or "nothing shown"
         print(
             f"{session['id']:>3}  {state:<8}  {session['root']}\n"
@@ -230,8 +215,7 @@ def cmd_ls(_args: argparse.Namespace) -> int:
     return 0
 
 
-#: OSC 11 asks the terminal for its background colour; the reply names it as
-#: one to four hex digits per channel.
+#: OSC 11 queries the terminal background using one to four hex digits per channel.
 _OSC11_QUERY = b"\x1b]11;?\x07"
 _OSC11_REPLY = re.compile(
     rb"\x1b\]11;rgba?:([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})/([0-9a-fA-F]{1,4})"
@@ -251,10 +235,9 @@ def _background_of(red: str, green: str, blue: str) -> str:
 def _detect_background(timeout: float = 0.15) -> str | None:
     """Ask the terminal this process is attached to for its background.
 
-    The session's nvim is headless and never sees a terminal, so nothing there
-    can answer this. Only the process the human runs can, which is why the
-    query belongs here and not in the broker. Returns None when there is no
-    terminal or it stays silent, leaving the session's own setting to stand.
+    Only this process has the human's terminal; headless nvim and the broker
+    cannot query it. Return None when no terminal answers so the session keeps
+    its current setting.
     """
     try:
         fd = os.open("/dev/tty", os.O_RDWR | os.O_NOCTTY)
@@ -263,7 +246,6 @@ def _detect_background(timeout: float = 0.15) -> str | None:
     try:
         saved = termios.tcgetattr(fd)
     except termios.error:
-        # Not a terminal, so there is nothing to ask.
         os.close(fd)
         return None
     try:
@@ -271,8 +253,7 @@ def _detect_background(timeout: float = 0.15) -> str | None:
     except OSError:
         return None
     finally:
-        # Raw mode and the descriptor are ours for the length of the query
-        # only; the human's terminal has to go back the way it was.
+        # Restore terminal state after the query, including error paths.
         termios.tcsetattr(fd, termios.TCSADRAIN, saved)
         os.close(fd)
 
@@ -297,13 +278,10 @@ def _read_osc11(fd: int, timeout: float) -> str | None:
 
 def cmd_attach(args: argparse.Namespace) -> NoReturn:
     _ensure_broker()
-    # The terminal is here, and the reply is what it looks like right now, so
-    # ask before handing the process over to nvim. The broker keeps an explicit
-    # --light or --dark ahead of this.
+    # Query before exec; an explicit session background still takes precedence.
     background = os.environ.get("SHOWME_BACKGROUND") or _detect_background()
-    # The broker starts the session's nvim if it has to; a socket path alone
-    # would be an error when nothing listens on it.
-    # Resolve against this shell's cwd, which can differ from the broker's.
+    # Ask the broker to start nvim before using its socket. Resolve directory
+    # targets in this shell because the broker has a different cwd.
     reply = _ask(
         {"cmd": "attach", "id": _attach_target(args.id), "background": background},
         timeout=30.0,
@@ -313,8 +291,7 @@ def cmd_attach(args: argparse.Namespace) -> NoReturn:
     nvim = shutil.which("nvim")
     if nvim is None:
         raise SystemExit("showme: nvim is not on PATH")
-    # A resolved path, a fixed argv, and a socket path the broker chose.
-    # Replacing this process is what makes the terminal the session's UI.
+    # Replace this process so the current terminal becomes nvim's UI.
     os.execv(nvim, [nvim, "--remote-ui", "--server", reply["socket"]])  # noqa: S606
 
 
@@ -327,12 +304,9 @@ def cmd_kill(args: argparse.Namespace) -> int:
 def cmd_mcp(_args: argparse.Namespace) -> int:
     """Serve MCP on stdio, for a client on the host or inside a sandbox.
 
-    The splice outlives the broker: when nothing answers the agent socket, this
-    starts one and the new broker adopts the sessions. A sandboxed client runs
-    the same command with the agent directory mounted read-only, where the
-    broker started here cannot claim the socket, so the one already serving it
-    on the host stays the only one -- and cannot ask for a broker at all,
-    which is why it is not offered the chance to wait for one.
+    A host splice restarts an unavailable broker, which then adopts existing
+    sessions. A sandbox mounts the agent directory read-only and cannot claim
+    its socket, so it cannot start or wait for a replacement broker.
     """
     sandboxed = paths.sandboxed()
     key = paths.box_key() if sandboxed else _session_here()
@@ -361,12 +335,10 @@ def _session_here() -> str | None:
             }
         )
     except (OSError, RuntimeError, SystemExit):
-        # No broker and no way to start one. The client still comes up, and
-        # says what it cannot do when a tool is called.
+        # Keep MCP available so tool calls can report the missing broker.
         return None
     if not reply.get("ok"):
-        # A root the human would not have chosen, most likely. Nothing is
-        # refused outright: they can still name a session by hand.
+        # Keep MCP available because the human can still provide a session key.
         print(f"showme: {reply.get('error')}", file=sys.stderr)
         return None
     return str(reply["key"])
@@ -403,8 +375,7 @@ def cmd_install(args: argparse.Namespace) -> int:
     try:
         path, shown, text = install.plan(harness, command)
     except install.Unparsable as e:
-        # Better a snippet the human pastes than a file this one rewrote by
-        # guessing at what it meant.
+        # Offer a manual snippet instead of rewriting an unparsed file.
         print(f"showme: {e}")
         print("showme: add this to it yourself:\n")
         print(textwrap.indent(install.snippet(harness, command), "    "))
@@ -441,8 +412,7 @@ def _offer_terminal(assume_yes: bool) -> None:
     )
     rc = install.shell_rc()
     if rc is not None and rc.exists() and lifecycle.TERMINAL in rc.read_text():
-        # Already written by an earlier run, or by hand. Appending a second
-        # export would only be confusing.
+        # Avoid duplicate exports from earlier or manual setup.
         print(f"showme: {rc} already sets it; start a new shell to pick it up.")
         return
     if rc is None or not _confirm(f"Append it to {rc}?", assume_yes):
@@ -490,14 +460,10 @@ def cmd_restart_broker(_args: argparse.Namespace) -> int:
         if reply.get("ok"):
             print(f"showme: stopping, {reply['sessions']} session(s) to hand over")
         else:
-            # A broker old enough not to know the command is exactly the one
-            # worth replacing, so ask the socket who is listening and signal
-            # it. State is written as it changes, not at exit, so what the
-            # next broker restores is the same either way.
+            # Older brokers lack the stop command. Signal the process attached
+            # to the admin socket; state is already saved after each change.
             _terminate_broker(reply.get("error", "stop refused"))
-        # The lock, not the socket: the old broker unlinks its sockets before
-        # it releases the lock, and a new one that starts too early finds the
-        # lock held and exits without a word.
+        # Wait for the lock because sockets disappear before shutdown releases it.
         if not _lock_free(10.0):
             raise SystemExit("showme: the broker is still running")
     _ensure_broker()
@@ -551,8 +517,7 @@ def main(argv: list[str] | None = None) -> int:
         action="store_true",
         help="start nvim without your config and plugins",
     )
-    # A headless nvim cannot ask the terminal, so it renders the dark palette
-    # into a light one unless told.
+    # Headless nvim needs the terminal background to render the correct palette.
     background = new.add_mutually_exclusive_group()
     background.add_argument(
         "--light",
@@ -609,9 +574,8 @@ def main(argv: list[str] | None = None) -> int:
         func=cmd_broker
     )
 
-    # `showme 3` and `showme ~/src/thing` are the common cases and should not
-    # need a subcommand. A command name always wins, so a directory that
-    # happens to be called `ls` is reached by spelling out `showme attach ls`.
+    # Accept common ID and directory attach forms without a subcommand. Command
+    # names take precedence; use `showme attach ls` for a conflicting directory.
     if argv and argv[0] not in sub.choices and _attachable(argv[0]):
         argv = ["attach", *argv]
 
@@ -633,8 +597,7 @@ def _attachable(argument: str) -> bool:
     try:
         return Path(argument).expanduser().is_dir()
     except (OSError, RuntimeError):
-        # A `~someone` with no such user, which expanduser raises on rather
-        # than leaving alone, or a word too long to be a path at all.
+        # Invalid users and overlong path components can raise during expansion.
         return False
 
 

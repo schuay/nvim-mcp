@@ -1,20 +1,17 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Resolve a client-supplied path against a session root.
+"""Resolve client paths and enforce the access granted by a session key.
 
-This is the security boundary for a sandboxed client: it may read only inside
-the root its session was created for. Symlinks resolve before the check, so a
-link planted inside the root cannot point at a credential elsewhere, and a path
-outside it is refused before anything is stat'd, so the refusals cannot be read
-as an answer to whether a file elsewhere exists. A refusal from inside the root
-names the path it was decided on, which is the only way a client that took the
-root for somewhere else can see where its relative paths are landing.
+A sandbox key may read only inside its session root. Resolve symlinks before
+checking containment so a link inside the root cannot expose a file outside
+it. Reject outside paths before statting them so the error does not reveal
+whether they exist. Errors for paths inside the root include the resolved path
+to expose an incorrect root or relative path.
 
-The boundary binds a key rather than a session, which is why `Anywhere` is
-here too: a client that took its key over the admin socket runs as the human
-and there is nothing to confine it to. Both kinds resolve the same way, so the
-callers do not know which one they hold.
+Host keys use `Anywhere`, which resolves relative paths against the session
+root without enforcing it as a boundary. Both implementations expose the same
+interface so callers cannot bypass the key's access policy.
 """
 
 from __future__ import annotations
@@ -25,16 +22,14 @@ from pathlib import Path
 
 
 class Refused(ValueError):
-    """A path a client may not open, carrying the reason to report back."""
+    """Report why a client path cannot be opened."""
 
 
 @dataclass(frozen=True)
 class Root:
     path: Path
 
-    #: Which reach a key bound to this one has. The broker logs it: a
-    #: connection says nothing about whether its client is sandboxed, and the
-    #: key it presented is the closest thing to an answer.
+    #: Access granted by a key bound to this root, for broker logging.
     scope = "root"
 
     @classmethod
@@ -50,18 +45,17 @@ class Root:
     def resolve(self, raw: str) -> Path:
         """Return the file `raw` names inside this root, or raise Refused.
 
-        `~` is not expanded: a client's path is data, not shell input, and
-        expansion would resolve outside the root by design.
+        Do not expand `~`: client paths are data, and expansion could escape
+        the root.
         """
-        # The root check first: whether a path outside the root exists is not
-        # this client's to learn. A symlink loop or an unreadable component
-        # refuses this one path rather than failing the whole call.
+        # Check containment before stat so errors do not reveal whether an
+        # outside path exists. Resolution errors reject only this path.
         resolved = self.locate(raw)
         try:
             mode = resolved.stat().st_mode
         except FileNotFoundError:
-            # Distinct from a directory or a device. A client that mistook the
-            # root spells a real file wrong, and needs to be told which it is.
+            # Name the resolved path to distinguish a missing file from a
+            # directory or device and expose an incorrect relative path.
             raise Refused(f"no such file: {resolved}") from None
         except OSError as e:
             raise Refused(f"cannot resolve: {e.strerror or e}") from e
@@ -72,10 +66,9 @@ class Root:
     def locate(self, raw: str) -> Path:
         """Return the path `raw` names inside this root, existing or not.
 
-        For a buffer the human has open: an agent that renamed or deleted the
-        file on disk must still be able to read what they are looking at. The
-        root check is the boundary and is unchanged; only the assertion that
-        something is there is left to the caller.
+        This supports open buffers whose files were renamed or deleted. It
+        still enforces the root boundary but leaves existence checks to the
+        caller.
         """
         resolved = self._under(raw)
         if resolved != self.path and self.path not in resolved.parents:
@@ -97,14 +90,11 @@ class Root:
 
 
 class Anywhere(Root):
-    """A root that is a base to resolve against and not a boundary.
+    """Resolve paths for a host key without enforcing the root boundary.
 
-    What the key issued over the admin socket reaches. That client runs as the
-    human: it reads their files with its own tools and edits them there, so
-    refusing it the header next door or the sibling worktree confines nothing
-    and only makes the tools useless for the work they are for. The path still
-    matters -- it is what a relative path is taken against, and nvim's cwd, so
-    a note and a `:Ref` keep naming files the way the two of them do.
+    A host client already has the human's file access. The root still controls
+    relative paths and nvim's working directory, which keeps notes and `:Ref`
+    paths consistent.
     """
 
     scope = "open"

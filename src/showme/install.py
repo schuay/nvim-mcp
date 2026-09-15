@@ -1,13 +1,11 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Register the tools with an agent harness, in the human's own config file.
+"""Register the tools in an agent harness's configuration.
 
-Every harness keeps its MCP servers somewhere different and in a different
-shape, so this writes the one entry each of them wants and leaves the rest of
-the file alone. It is a config file belonging to the human: nothing is written
-without showing the change and asking, a copy of the file is kept beside it,
-and a file this cannot parse is described rather than rewritten.
+Each harness uses a different path and MCP server format. Preserve unrelated
+configuration, preview and confirm changes, and back up existing files. Show a
+manual snippet when a configuration cannot be parsed safely.
 """
 
 from __future__ import annotations
@@ -21,8 +19,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-#: The server's name in a harness config. The tools are `show` and `read`;
-#: this is what the human sees in a server list.
+#: The name shown for this server in harness configuration and server lists.
 NAME = "showme"
 
 
@@ -30,9 +27,7 @@ NAME = "showme"
 class Harness:
     key: str
     label: str
-    #: Relative to the home directory, because that is where all of them are.
     config: str
-    #: The key holding servers, and the shape of one entry.
     section: str
 
     @property
@@ -59,24 +54,24 @@ HARNESSES = {
 
 
 def showme_command() -> str:
-    """The absolute path of this `showme`, so a harness does not need it on PATH."""
+    """Return an absolute executable path so harnesses do not depend on PATH."""
     found = shutil.which(sys.argv[0]) or shutil.which("showme")
     return str(Path(found).resolve()) if found else "showme"
 
 
 def opencode_path() -> Path:
-    """opencode reads either spelling; take whichever the human already has."""
+    """Use either opencode filename, preferring the existing variant."""
     jsonc = Path.home() / ".config" / "opencode" / "opencode.jsonc"
     plain = Path.home() / ".config" / "opencode" / "opencode.json"
     return jsonc if jsonc.exists() and not plain.exists() else plain
 
 
 class Unparsable(Exception):
-    """The config is there but not something to rewrite safely."""
+    """Prevent an unsafe configuration rewrite."""
 
 
 def snippet(harness: Harness, command: str) -> str:
-    """The entry to add, as the human would write it themselves."""
+    """Render the configuration entry for manual installation."""
     if harness.key == "codex":
         return f'[{harness.section}.{NAME}]\ncommand = "{command}"\nargs = ["mcp"]\n'
     return json.dumps({harness.section: {NAME: harness.entry(command)}}, indent=2)
@@ -123,14 +118,13 @@ def _toml_plan(path: Path, harness: Harness, command: str) -> tuple[str, str | N
             raise Unparsable(f"{path} is not valid TOML ({e})") from e
         if NAME in document.get(harness.section, {}):
             return block, None
-    # Appended rather than rewritten: tomllib only reads, and a rewrite would
-    # cost the human every comment and every bit of ordering in the file.
+    # Append because tomllib cannot preserve comments or ordering in a rewrite.
     separator = "" if not existing or existing.endswith("\n\n") else "\n"
     return block, existing + separator + block
 
 
 def apply(path: Path, text: str) -> Path | None:
-    """Write the config, keeping a copy of what was there. Returns the copy."""
+    """Write the configuration and return the backup path, if one was made."""
     backup = None
     if path.exists():
         backup = path.with_suffix(path.suffix + ".showme.bak")
@@ -140,8 +134,7 @@ def apply(path: Path, text: str) -> Path | None:
     return backup
 
 
-#: Terminals this can name, and what each needs before a command. Only one
-#: that is actually installed is ever suggested.
+#: Supported terminal commands; suggestions include only installed terminals.
 TERMINALS = {
     "ghostty": "ghostty -e",
     "kitty": "kitty",
@@ -155,7 +148,7 @@ TERMINALS = {
 
 
 def terminal_suggestion() -> str | None:
-    """A value for SHOWME_TERMINAL, from the terminal the human is in."""
+    """Suggest SHOWME_TERMINAL from the current terminal environment."""
     program = (os.environ.get("TERM_PROGRAM") or "").lower()
     candidates = [program, os.environ.get("TERMINAL", ""), *TERMINALS]
     for candidate in candidates:
@@ -166,7 +159,7 @@ def terminal_suggestion() -> str | None:
 
 
 def shell_rc() -> Path | None:
-    """The file an export belongs in, for the shells where it is one line."""
+    """Return the startup file for shells that use a one-line export."""
     shell = Path(os.environ.get("SHELL", "")).name
     if shell == "bash":
         return Path.home() / ".bashrc"

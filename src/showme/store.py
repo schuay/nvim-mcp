@@ -1,15 +1,11 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Keep sessions across broker restarts.
+"""Persist session reviews across broker restarts.
 
-A session holds a review the human has not read yet, so losing the broker must
-not lose the review. The file records what each session shows and what the
-human has handed back; the nvim processes themselves are started again from it.
-
-Session keys are in here, and a key authorizes a client to use its session.
-The file is written inside the state directory, which is created private and
-checked for ownership.
+The state file records frames, human replies, and session keys. Store it in the
+private, ownership-checked state directory because each key grants access to a
+session.
 """
 
 from __future__ import annotations
@@ -39,10 +35,9 @@ def path() -> Path:
 def load() -> list[dict[str, Any]]:
     """Return the saved sessions, or none if the file cannot be honoured.
 
-    A file this broker cannot read or does not understand is moved aside, not
-    ignored: the next save would otherwise replace it with an empty document
-    and the sessions in it would be gone for good. If it cannot be moved, the
-    error propagates and the broker does not start.
+    Move unreadable or unsupported state aside before returning an empty list;
+    otherwise the next save would overwrite recoverable sessions. Refuse to
+    start if the file cannot be moved.
     """
     target = path()
     try:

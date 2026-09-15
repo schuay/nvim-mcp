@@ -3,15 +3,11 @@
 
 """Serve MCP to one client connection.
 
-The tool list is the broker's entire exposed surface, so nothing here writes: a
-client can put code in front of the human and read what the human is looking
-at, and nothing else. Sessions are addressed by their secret key, because the
-broker cannot tell one sandboxed client from another.
-
-What a read may reach comes from the key it arrived with, not from the session:
-a sandboxed client is clamped to the session root, and a client that took its
-key on the host reads what the human reads. A mark is outside both: only the
-human makes one, and `:Ask` on a range is them handing it over deliberately.
+The two tools expose only display and read operations. Secret keys select a
+session and its access boundary because the broker cannot otherwise distinguish
+sandbox clients. Sandbox keys restrict reads to the session root; host keys may
+read any buffer visible to the human. Marks always include their referenced
+text because the human explicitly sends it with `:Ask`.
 """
 
 from __future__ import annotations
@@ -135,13 +131,10 @@ SessionLookup = Callable[[str], tuple[Session, Root] | None]
 
 
 def pending(session: Session) -> list[dict[str, Any]]:
-    """Return the questions nobody has answered yet.
+    """Return questions that no agent has acknowledged.
 
-    A mark stays pending until an agent acknowledges it, not until some agent
-    reads it. Reading is not answering: a client that reads and then
-    disconnects, or a second agent looking on, must not be what makes the
-    human's question disappear. A reconnecting client is the common case, since
-    each one starts a new MCP session.
+    Reading does not clear a mark because the reader may disconnect before
+    answering, and multiple agents may share a session.
     """
     return [mark for mark in session.marks if not mark.get("acked")]
 
@@ -160,11 +153,9 @@ async def _show(session: Session, root: Root, request: ShowRequest) -> ShowResul
     locations, refused = [], []
     for spec in request.locations:
         try:
-            # Resolve once. The path that goes to nvim is the one that passed
-            # the clamp, so there is no second resolution to disagree with it.
+            # Pass nvim the exact path that passed the access check.
             resolved = root.resolve(spec.file)
         except Refused as e:
-            # One bad path does not spoil the rest of a review.
             refused.append(Refusal(file=spec.file, reason=str(e)))
             continue
         locations.append(
@@ -192,17 +183,12 @@ async def _show(session: Session, root: Root, request: ShowRequest) -> ShowResul
         frame = result["frame"]
         popped = result["popped"]
         opened_ui = result["opened_ui"] or None
-        # Taken under the session's lock, so it describes this call rather
-        # than whatever another agent did while this one was answering.
+        # These frames were captured under the session lock for this call.
         frames = [FrameSummary(**summary) for summary in result["frames"]]
-        # nvim reports how many UIs it has while applying the show, which saves
-        # a second round trip for the same fact.
+        # Reuse the UI count from the atomic show operation.
         attached = bool(result.get("uis"))
 
-    # Nobody saw it: nothing was attached and no window opened for it. The
-    # broker cannot reach the human, so the agent is told to hand the command
-    # over -- over ssh, where no window can open, that is the only way a
-    # session ever gets a screen.
+    # Tell the agent how to attach when the broker cannot open a visible UI.
     unseen = None
     if locations and not attached and not opened_ui:
         unseen = (
@@ -230,17 +216,15 @@ async def _read(session: Session, root: Root, request: ReadRequest) -> ReadResul
     for mark in session.marks:
         if mark.get("id") in acknowledged:
             mark["acked"] = True
-    # An id that names no mark is a mistake worth hearing about: the agent
-    # believes it answered a question that is still waiting.
+    # Report unknown IDs so an agent cannot mistake a failed ack for success.
     unknown = sorted(acknowledged - {mark.get("id") for mark in session.marks})
     options: dict[str, Any] = {}
     target: Path | None = None
     if request.what == "range":
         if not request.file:
             raise Refused("read(what='range') needs a file")
-        # Located, not resolved: a buffer the human is editing outlives the
-        # file, and an agent that just renamed it is the likeliest reason to
-        # be asking. Whether anything is there is settled after nvim answers.
+        # Check containment without requiring a file; an open buffer can
+        # outlive a rename or deletion.
         target = root.locate(request.file)
         options = {
             "file": str(target),
@@ -255,8 +239,7 @@ async def _read(session: Session, root: Root, request: ReadRequest) -> ReadResul
         envelope["unknown_ack"] = unknown
 
     if request.what == "notes":
-        # Read from the record rather than from nvim, which holds no text of
-        # its own; the sync that just ran brought the lines up to date.
+        # The broker owns note text; the preceding sync refreshed its positions.
         return ReadResult(
             **envelope,
             frames=[
@@ -303,8 +286,7 @@ def _within(root: Root, state: dict[str, Any]) -> bool:
     if not file:
         return False
     try:
-        # Where it is, not whether it is there: nvim is reporting a buffer it
-        # holds, which may no longer have a file behind it.
+        # Check containment without requiring the buffer's file to still exist.
         return root.contains(root.locate(file))
     except Refused:
         return False
@@ -321,10 +303,9 @@ def build(
 ) -> Server:
     """Serve the two tools over one connection.
 
-    `default_key` is the session this connection was opened for, if it named
-    one. It stands in for an omitted `session` argument, so a client launched
-    for a single session never handles a key and a client serving several
-    still picks per call.
+    Use `default_key` when the request omits `session`. This keeps a single
+    session client's key out of tool arguments while multi-session clients can
+    still select a key per call.
     """
 
     async def on_list_tools(_ctx: Any, _params: Any) -> types.ListToolsResult:
@@ -398,9 +379,8 @@ async def serve(
 ) -> None:
     """Run one MCP session over an asyncio stream pair.
 
-    MCP defines stdio and HTTP transports, not a socket one. This is stdio's
-    framing on a socket, so the client side stays a byte splice with no schema
-    of its own.
+    Use MCP's stdio framing over the socket so the splice can remain a
+    schema-free byte relay.
     """
     read_w, read_r = anyio.create_memory_object_stream[SessionMessage | Exception](0)
     write_w, write_r = anyio.create_memory_object_stream[SessionMessage](0)

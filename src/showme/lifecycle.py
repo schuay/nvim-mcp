@@ -1,25 +1,17 @@
 # Copyright 2026 The showme developers
 # SPDX-License-Identifier: MIT
 
-"""Start, adopt, and stop the nvim behind a session.
+"""Start, adopt, and stop the nvim owned by a session.
 
-A running nvim need not be this broker's child: the broker that started it
-may have exited or crashed since, and the human may still be attached to it.
-Bringing a session up therefore tries its socket first and spawns only when
-nobody answers. nvim is spawned in its own process group and with the
-caller's environment, so it outlives the broker and finds the language
-servers and display the human's shell would.
+Connect to an existing nvim before spawning one because it may outlive the
+broker that started it. Spawn nvim in its own process group with the session's
+saved environment so it can outlive this broker and reach the human's tools and
+display. Broker shutdown detaches; only `showme kill` stops nvim.
 
-Stopping is deliberate. A broker going away detaches and leaves nvim running
-for the next broker to adopt; only `showme kill` stops one.
-
-A session nobody is watching can also be given a window here. That is an
-administrative act, so it is not in the tool list: an agent cannot ask for it,
-it happens because the agent showed something and nothing was on screen. What
-runs comes from the environment the human's shell handed over when the session
-was made, never from anything a client sends. Where that environment can open
-nothing -- over ssh -- the tool layer hands the agent the attach command to
-pass on, which is the only way such a session reaches a screen.
+Open a terminal window after an agent shows something to an unattended session.
+Only the saved human environment supplies the terminal command. If that
+environment has no display, the tool result tells the agent which attach
+command to give the human.
 """
 
 from __future__ import annotations
@@ -40,10 +32,7 @@ log = logging.getLogger(__name__)
 
 Outcome = Literal["alive", "adopted", "started", "absent"]
 
-#: Set this in the shell you start sessions from, to a terminal and whatever
-#: it needs before a command -- `ghostty -e`, `kitty`, `alacritty -e` -- and a
-#: window opens when an agent shows something to a session nobody is watching.
-#: Unset means no window, which is also the answer over ssh.
+#: Terminal command used to open a window for an unattended session.
 TERMINAL = "SHOWME_TERMINAL"
 
 
@@ -62,32 +51,26 @@ class Editor:
         self.clean = clean
         self.env = env
         self.rpc: NvimRPC | None = None
-        #: Set only for an nvim this broker spawned. An adopted one is known
-        #: by pid alone.
+        #: Set only for nvim processes spawned by this broker.
         self.process: asyncio.subprocess.Process | None = None
         self.pid: int | None = None
-        #: Whether this nvim has been given a window already. One per nvim
-        #: process: the human who closes it has quit nvim too, and the next
-        #: show starts a fresh one that may open a window of its own.
+        #: Limit automatic windows to one per nvim process.
         self.windowed = False
 
     @property
     def alive(self) -> bool:
-        # Only nvim exiting closes its side of the connection, and the read
-        # loop sees that at once, before any exit status could.
+        # The connection closes as soon as nvim exits, before process status is useful.
         return self.rpc is not None and not self.rpc.closed
 
     async def ensure(self, spawn: bool = True) -> Outcome:
         """Have a live connection, adopting or starting nvim as needed.
 
-        Returns what it took, because the caller has to set up a fresh nvim
-        and reconcile with an adopted one.
+        Return the outcome so callers can initialize a new nvim or reconcile
+        an adopted one.
         """
         if self.alive:
             return "alive"
-        # Drop the connection, not the editor. Losing contact says nothing
-        # about nvim, which may be listening on its socket with edits in it
-        # that nobody has saved; reconnecting is tried before replacing.
+        # Reconnect before replacing nvim because it may still hold unsaved edits.
         await self._disconnect()
         if await self._adopt():
             return "adopted"
@@ -105,14 +88,13 @@ class Editor:
     async def _forget(self) -> None:
         """Give up on the nvim behind this session, having failed to reach it.
 
-        Only after a reconnection has been tried: nvim that answers its socket
-        is this session's nvim, however the last connection ended.
+        Call only after reconnection fails. An nvim that answers the session
+        socket still owns the session regardless of how the connection ended.
         """
         await self._disconnect()
         if self.process is not None:
             if self.process.returncode is None:
-                # Its connection is gone, so it is exiting or wedged. Either
-                # way it is not coming back as this session's nvim.
+                # A spawned process that cannot reconnect is exiting or wedged.
                 self.process.kill()
                 await self.process.wait()
             self.process = None
@@ -124,7 +106,7 @@ class Editor:
         try:
             rpc = await NvimRPC.connect(self.socket)
         except OSError:
-            # A socket file with nobody behind it, left by a crash.
+            # Remove a stale socket left by a crash.
             self.socket.unlink(missing_ok=True)
             return False
         try:
@@ -159,9 +141,8 @@ class Editor:
     def open_window(self) -> bool:
         """Put this session on the human's screen, at most once per nvim.
 
-        The terminal runs nvim directly rather than `showme`: the socket is
-        known here, so there is nothing to ask the admin socket for, and which
-        `showme` is on a path stops mattering.
+        Run nvim directly because the socket is already known. This avoids an
+        admin-socket lookup and any dependency on which `showme` is on PATH.
         """
         env = self.env or {}
         command = shlex.split(env.get(TERMINAL, ""))
@@ -170,8 +151,7 @@ class Editor:
         if not (env.get("WAYLAND_DISPLAY") or env.get("DISPLAY")):
             log.info("no display in the session environment; not opening a window")
             return False
-        # Set whatever happens next. A terminal that fails to start would
-        # otherwise be retried on every show.
+        # Do not retry a failed terminal command on every show.
         self.windowed = True
         try:
             subprocess.Popen(  # noqa: S603
@@ -192,8 +172,7 @@ class Editor:
         while asyncio.get_running_loop().time() < deadline:
             if self.socket.exists():
                 return
-            # A configuration error kills nvim in milliseconds. Without this the
-            # failure is reported as a timeout, naming the wrong cause.
+            # Report early nvim exit directly instead of misclassifying it as a timeout.
             if self.process is not None and self.process.returncode is not None:
                 raise RuntimeError(
                     f"nvim exited with status {self.process.returncode}; see {self.log}"
